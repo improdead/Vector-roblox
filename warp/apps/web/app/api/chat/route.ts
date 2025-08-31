@@ -1,0 +1,29 @@
+export const runtime = 'nodejs'
+
+import { z } from 'zod'
+import { runLLM } from '../../../lib/orchestrator'
+
+const ChatSchema = z.object({
+  projectId: z.string(),
+  message: z.string(),
+  context: z.object({
+    activeScript: z.object({ path: z.string(), text: z.string() }).nullable(),
+    selection: z.array(z.object({ className: z.string(), path: z.string() })).optional(),
+    openDocs: z.array(z.object({ path: z.string() })).optional(),
+  }),
+})
+
+export async function POST(req: Request) {
+  try {
+    const input = ChatSchema.parse(await req.json())
+    const proposals = await runLLM(input)
+    return Response.json({ proposals })
+  } catch (err: any) {
+    console.error('chat handler error', err)
+    return new Response(
+      JSON.stringify({ error: err?.message || 'Invalid request' }),
+      { status: 400, headers: { 'content-type': 'application/json' } },
+    )
+  }
+}
+

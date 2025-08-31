@@ -1,0 +1,14 @@
+{
+  "$schema": "https://raw.githubusercontent.com/rojo-rbx/rojo/master/schema.json",
+  "name": "warp-plugin",
+  "tree": {
+    "$className": "DataModel",
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "WarpPlugin": {
+        "$path": "src"
+      }
+    }
+  }
+}
+
