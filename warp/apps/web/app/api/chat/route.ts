@@ -2,6 +2,7 @@ export const runtime = 'nodejs'
 
 import { z } from 'zod'
 import { runLLM } from '../../../lib/orchestrator'
+import { saveProposals } from '../../../lib/store/proposals'
 
 const ChatSchema = z.object({
   projectId: z.string(),
@@ -17,6 +18,14 @@ export async function POST(req: Request) {
   try {
     const input = ChatSchema.parse(await req.json())
     const proposals = await runLLM(input)
+
+    // Persist proposals for auditing and later apply acknowledgement
+    try {
+      saveProposals({ projectId: input.projectId, message: input.message, proposals })
+    } catch (e) {
+      console.warn('failed to persist proposals (non-fatal)', e)
+    }
+
     return Response.json({ proposals })
   } catch (err: any) {
     console.error('chat handler error', err)
