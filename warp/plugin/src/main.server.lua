@@ -664,17 +664,34 @@ local function renderProposals(list, proposals)
 end
 
 local function sendChat(projectId, message, ctx)
-	local url = "http://127.0.0.1:3000/api/chat"
-	local resp = Http.postJson(url, {
-		projectId = projectId,
-		message = message,
-		context = ctx,
-	})
-	return resp
+    local url = "http://127.0.0.1:3000/api/chat"
+    local settings = {
+        baseUrl = plugin:GetSetting("vector_base_url"),
+        apiKey = plugin:GetSetting("vector_api_key"),
+        model = plugin:GetSetting("vector_model"),
+    }
+    local provider
+    if typeof(settings.apiKey) == "string" and #settings.apiKey > 0 then
+        provider = {
+            name = "openrouter",
+            baseUrl = typeof(settings.baseUrl) == "string" and settings.baseUrl or "https://openrouter.ai/api/v1",
+            apiKey = settings.apiKey,
+            model = typeof(settings.model) == "string" and settings.model or "moonshotai/kimi-k2:free",
+        }
+    end
+
+    local resp = Http.postJson(url, {
+        projectId = projectId,
+        message = message,
+        context = ctx,
+        provider = provider,
+    })
+    return resp
 end
 
 local toolbar = plugin:CreateToolbar("Vector")
 local toggleButton = toolbar:CreateButton("Vector", "Open Vector chat", "")
+local settingsButton = toolbar:CreateButton("Vector Settings", "Configure provider settings", "")
 
 toggleButton.Click:Connect(function()
 	local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Left, true, false, 360, 480, 240, 320)
@@ -710,6 +727,86 @@ toggleButton.Click:Connect(function()
 		end
 		renderProposals(list, parsed.proposals or {})
 	end)
+end)
+
+-- Settings UI (API Provider)
+local function loadProviderSettings()
+    local baseUrl = plugin:GetSetting("vector_base_url")
+    local apiKey = plugin:GetSetting("vector_api_key")
+    local model = plugin:GetSetting("vector_model")
+    return {
+        baseUrl = typeof(baseUrl) == "string" and baseUrl or "https://openrouter.ai/api/v1",
+        apiKey = typeof(apiKey) == "string" and apiKey or "",
+        model = typeof(model) == "string" and model or "moonshotai/kimi-k2:free",
+    }
+end
+
+local function saveProviderSettings(s)
+    if s.baseUrl then plugin:SetSetting("vector_base_url", s.baseUrl) end
+    if s.apiKey ~= nil then plugin:SetSetting("vector_api_key", s.apiKey) end
+    if s.model then plugin:SetSetting("vector_model", s.model) end
+end
+
+local function openSettings()
+    local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, false, 420, 360, 360, 300)
+    local gui = plugin:CreateDockWidgetPluginGui("VectorSettings", info)
+    gui.Title = "Vector Settings"
+
+    local root = Instance.new("Frame")
+    root.Size = UDim2.new(1, 0, 1, 0)
+    root.BackgroundTransparency = 1
+    root.Parent = gui
+
+    local function mkLabel(text, y)
+        local l = Instance.new("TextLabel")
+        l.Text = text
+        l.TextXAlignment = Enum.TextXAlignment.Left
+        l.BackgroundTransparency = 1
+        l.Position = UDim2.new(0, 12, 0, y)
+        l.Size = UDim2.new(1, -24, 0, 20)
+        l.Parent = root
+        return l
+    end
+    local function mkInput(y)
+        local t = Instance.new("TextBox")
+        t.Size = UDim2.new(1, -24, 0, 28)
+        t.Position = UDim2.new(0, 12, 0, y)
+        t.BackgroundColor3 = Color3.fromRGB(36, 36, 36)
+        t.TextXAlignment = Enum.TextXAlignment.Left
+        t.Text = ""
+        t.ClearTextOnFocus = false
+        t.Parent = root
+        return t
+    end
+
+    local cfg = loadProviderSettings()
+    mkLabel("API Provider: OpenAI Compatible (OpenRouter)", 12)
+    mkLabel("Base URL", 42)
+    local baseInput = mkInput(62)
+    baseInput.Text = cfg.baseUrl
+
+    mkLabel("API Key", 98)
+    local keyInput = mkInput(118)
+    keyInput.Text = cfg.apiKey
+
+    mkLabel("Model ID", 154)
+    local modelInput = mkInput(174)
+    modelInput.Text = cfg.model
+
+    local saveBtn = Instance.new("TextButton")
+    saveBtn.Text = "Done"
+    saveBtn.Size = UDim2.new(0, 96, 0, 28)
+    saveBtn.Position = UDim2.new(1, -108, 1, -40)
+    saveBtn.Parent = root
+    saveBtn.MouseButton1Click:Connect(function()
+        saveProviderSettings({ baseUrl = baseInput.Text, apiKey = keyInput.Text, model = modelInput.Text })
+        gui.Enabled = false
+        gui:Destroy()
+    end)
+end
+
+settingsButton.Click:Connect(function()
+    openSettings()
 end)
 
 return {}

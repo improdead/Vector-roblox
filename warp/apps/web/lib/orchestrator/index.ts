@@ -30,6 +30,7 @@ export type ChatInput = {
     selection?: { className: string; path: string }[]
     openDocs?: { path: string }[]
   }
+  provider?: { name: 'openrouter'; apiKey: string; model?: string; baseUrl?: string }
 }
 
 function id(prefix = 'p'): string {
@@ -184,9 +185,18 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   const msg = input.message.trim()
 
   let providerContent: string | undefined
-  if (process.env.VECTOR_USE_OPENROUTER === '1') {
+  const useProvider =
+    (input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey) ||
+    process.env.VECTOR_USE_OPENROUTER === '1'
+  if (useProvider) {
     try {
-      const resp = await callOpenRouter({ systemPrompt: SYSTEM_PROMPT, messages: [{ role: 'user', content: msg }] })
+      const resp = await callOpenRouter({
+        systemPrompt: SYSTEM_PROMPT,
+        messages: [{ role: 'user', content: msg }],
+        model: input.provider?.model,
+        apiKey: input.provider?.apiKey,
+        baseUrl: input.provider?.baseUrl,
+      })
       providerContent = resp.content || ''
     } catch (e: any) {
       providerContent = undefined
@@ -290,4 +300,3 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
     { id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } },
   ]
 }
-

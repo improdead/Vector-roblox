@@ -4,6 +4,13 @@ import { z } from 'zod'
 import { runLLM } from '../../../lib/orchestrator'
 import { saveProposals } from '../../../lib/store/proposals'
 
+const ProviderSchema = z.object({
+  name: z.literal('openrouter'),
+  apiKey: z.string().min(1),
+  baseUrl: z.string().url().optional(),
+  model: z.string().optional(),
+}).optional()
+
 const ChatSchema = z.object({
   projectId: z.string(),
   message: z.string(),
@@ -12,6 +19,7 @@ const ChatSchema = z.object({
     selection: z.array(z.object({ className: z.string(), path: z.string() })).optional(),
     openDocs: z.array(z.object({ path: z.string() })).optional(),
   }),
+  provider: ProviderSchema,
 })
 
 export async function POST(req: Request) {
@@ -35,4 +43,3 @@ export async function POST(req: Request) {
     )
   }
 }
-

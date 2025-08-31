@@ -6,16 +6,19 @@ export async function callOpenRouter(opts: {
   systemPrompt: string
   messages: ORMessage[]
   model?: string
+  apiKey?: string
+  baseUrl?: string
 }): Promise<{ content: string }>
 {
-  const apiKey = process.env.OPENROUTER_API_KEY
+  const apiKey = opts.apiKey || process.env.OPENROUTER_API_KEY
   if (!apiKey) {
     throw new Error('Missing OPENROUTER_API_KEY')
   }
   const model = opts.model || process.env.OPENROUTER_MODEL || 'moonshotai/kimi-k2:free'
   const messages: ORMessage[] = [{ role: 'system', content: opts.systemPrompt }, ...opts.messages]
 
-  const res = await fetch(OPENROUTER_URL, {
+  const url = (opts.baseUrl ? opts.baseUrl.replace(/\/$/, '') + '/chat/completions' : OPENROUTER_URL)
+  const res = await fetch(url, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
@@ -34,4 +37,3 @@ export async function callOpenRouter(opts: {
   const content: string = json?.choices?.[0]?.message?.content ?? ''
   return { content }
 }
-

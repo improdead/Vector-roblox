@@ -33,7 +33,7 @@ Wait for each tool result before the next step.
 - list_open_documents()
 - show_diff(path, edits[])
 - apply_edit(path, edits[])
-- create_instance(className,parent,props)
+- create_instance(className,parentPath,props)
 - set_properties(path, props)
 - search_assets(query,tags?,limit?)
 - insert_asset(assetId,parentPath)
@@ -106,10 +106,10 @@ These are the server‑registered tools exposed to the LLM. Keep schemas strict 
         "type": "object",
         "properties": {
           "className": {"type": "string"},
-          "parent": {"type": "string"},
+          "parentPath": {"type": "string"},
           "props": {"type": "object"}
         },
-        "required": ["className", "parent"]
+        "required": ["className", "parentPath"]
       }
     },
     {
@@ -245,7 +245,7 @@ end
 
 **Server (Next.js)**
 
-* `GET /api/assets/search?query=…&tags=…&limit=…` — Catalog search (server‑side). Normalize results to `{ id, name, creator, type, thumbnailUrl }`.
+* `GET /api/assets/search?query=…&tags=…&limit=…` — Catalog search (server‑side). Also accepts legacy `q` as alias for `query`. Normalize results to `{ id, name, creator, type, thumbnailUrl }`.
 * Optionally cache by `query` and tags.
 
 **Plugin (Luau)**
@@ -414,7 +414,7 @@ export const Tools = {
   list_open_documents: z.object({}),
   show_diff: z.object({ path: z.string(), edits: z.array(Edit) }),
   apply_edit: z.object({ path: z.string(), edits: z.array(Edit) }),
-  create_instance: z.object({ className: z.string(), parent: z.string(), props: z.record(z.any()).optional() }),
+  create_instance: z.object({ className: z.string(), parentPath: z.string(), props: z.record(z.any()).optional() }),
   set_properties: z.object({ path: z.string(), props: z.record(z.any()) }),
   search_assets: z.object({ query: z.string(), tags: z.array(z.string()).optional(), limit: z.number().min(1).max(50).optional() }),
   insert_asset: z.object({ assetId: z.number(), parentPath: z.string().optional() })
@@ -943,6 +943,7 @@ Note on cline_openai.md
 - In Roblox Studio:
   - Load the plugin (via Rojo or by placing the plugin folder)
   - Click the Vector toolbar button to open the dock
+  - Click "Vector Settings" to enter your provider info (OpenRouter-compatible). Use Base URL `https://openrouter.ai/api/v1`, paste your API Key, and choose a Model ID (e.g., `moonshotai/kimi-k2:free`). Saved locally via plugin settings.
   - Type a message, click Send
   - Approve/Reject proposals; edits and rename ops will apply as described
 
@@ -959,3 +960,17 @@ Note on cline_openai.md
   - Persist proposals/audit records in a durable store and add filtering endpoints
   - Move to Vercel and add the hosted domain to Studio’s allowed list
   - Expand provider tool‑call parsing into a full multi-turn Plan/Act execution loop with guardrails and retries
+
+---
+
+## Local Provider Settings (no .env required)
+
+- Goal: avoid committing secrets to git. Configure provider credentials inside Roblox Studio, per-user.
+- Open the toolbar item "Vector Settings" to configure:
+  - Base URL: e.g., `https://openrouter.ai/api/v1` (OpenAI-compatible)
+  - API Key: your provider key (stored locally via `plugin:SetSetting`, never committed)
+  - Model ID: e.g., `moonshotai/kimi-k2:free` or `deepseek/deepseek-chat`
+- Transport & Security:
+  - The plugin sends `provider` in the `/api/chat` body: `{ name:'openrouter', baseUrl, apiKey, model }`.
+  - The server uses these values for the provider call and does not persist them (only proposals are stored).
+  - `.gitignore` excludes env files under `warp/apps/web` and the local `data/` folder.

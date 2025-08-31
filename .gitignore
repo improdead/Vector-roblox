@@ -1,0 +1,14 @@
+# Node / Next.js
+node_modules/
+.next/
+
+# Env files
+warp/apps/web/.env
+warp/apps/web/.env.local
+warp/apps/web/.env.*
+
+# Local data store
+data/
+
+# macOS
+.DS_Store
