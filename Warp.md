@@ -847,15 +847,22 @@ warp/
 
 # 10) Deliverables checklist for M1
 
-* Docked chat UI, context capture, HTTP permission flow
-* `/api/chat` round‑trip producing `edit` and `object_op` proposals
-* Diff preview + one‑click **Apply** (single undo step)
-* Asset search + insert flow
-* Audit log of proposals and outcomes
+- Docked chat UI, context capture, HTTP permission flow — implemented
+- `/api/chat` round-trip producing `edit` and `object_op` proposals — implemented
+- Diff preview + one-click **Apply** (single undo step) — full unified diff renderer implemented; shows context, additions/deletions, multiple hunks, with Open/Close Diff toggle
+- Asset search + insert flow — implemented (server stub + plugin Browse + Insert)
+- Audit log of proposals and outcomes — implemented with file-backed JSON durability and apply acknowledgements
 
 ---
 
-## Implementation Progress — 2025-08-31
+## Implementation Progress — 2025-08-31 (updated @ 21:06 UTC)
+
+Recent updates
+
+- Added zod-based validation of provider tool-call arguments before mapping to proposals
+- Added Plan/Act scaffold: executes context tools locally and performs a second provider call for the next actionable tool
+- Switched proposals store to file-backed JSON durability (apps/web/data/proposals.json)
+- Introduced Catalog provider interface (env CATALOG_API_URL) for real search; stub remains fallback
 
 Decisions captured
 
@@ -870,34 +877,38 @@ Decisions captured
 Working now
 
 - Web (Next.js + npm)
-  - Local app scaffold (Next 14) with npm scripts; landing page at /. 
-  - API routes available and return stub JSON: /api/chat, /api/assets/search, /api/proposals/[id]/apply.
-  - Optional OpenRouter call for notes when VECTOR_USE_OPENROUTER=1; proposals still stubbed.
-- Orchestrator (server)
-  - runLLM returns safe placeholder proposals (comment insertion "-- Vector: ...", rename fallback, or asset search).
-  - Zod tool schemas defined in lib/tools/schemas.ts.
-  - Provider adapters present: openrouter.ts (optional call), openai.ts (stub).
+  - Local app scaffold (Next 14) with npm scripts; landing page at /.
+  - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search uses a provider interface (real via CATALOG_API_URL or stub); /api/assets/generate3d returns a stub jobId.
+  - Provider tool-call parsing (OpenRouter) behind flags: when VECTOR_USE_OPENROUTER=1, model outputs exactly one XML-like tool call which is parsed and mapped to proposals. Arguments are validated with zod before mapping. Falls back to safe proposals if parsing fails.
+  - Plan/Act scaffold behind VECTOR_PLAN_ACT=1: if the first tool is a context tool (get_active_script, list_selection, list_open_documents), we execute it locally from the provided context, store the result in a short session, and issue a second provider call using that result to get the next actionable tool.
+  - Provider adapters present: openrouter.ts (call path), openai.ts (stub).
 - Plugin (Vector)
   - Dock UI with input + Send. Sends context (active script + selection) to /api/chat and renders proposals.
   - Approve/Reject per proposal; applies:
     - edit proposals that insert text via rangeEDITS (merged, UpdateSourceAsync with undo)
     - object_op rename_instance (ChangeHistoryService wrapped)
+  - Added "Apply & Open" for edit proposals (opens the script after a successful apply).
+  - Asset search flow: Browse button fetches /api/assets/search results → Inline list with Insert buttons → inserts via InsertService.
+  - Reports apply results back to /api/proposals/:id/apply for auditing.
   - Simple diff preview snippet (shows inserted text).
 
 Configured locally
 
 - Environment
   - warp/apps/web/.env present with OPENROUTER_API_KEY (provided) and OPENROUTER_MODEL=moonshotai/kimi-k2:free (default).
-  - VECTOR_USE_OPENROUTER=0 by default; set to 1 to enable provider call for notes.
+  - VECTOR_USE_OPENROUTER=0 by default; set to 1 to enable provider-driven tool-call parsing.
+  - VECTOR_PLAN_ACT=0 by default; set to 1 to enable a second provider call after context tools (Plan/Act scaffold).
+- CATALOG_API_URL optional: when set, /api/assets/search calls this URL to fetch normalized results; otherwise it uses a stub list.
+  - Data directory: proposals are persisted to apps/web/data/proposals.json (auto-created on write).
   - Do not commit .env to version control.
 
 Not yet implemented (next milestones)
 
-- Full provider-driven tool-call parsing (OpenRouter) and deterministic execution
+- Provider-driven tool-call execution loop (multi-turn Plan/Act with context tools) and stricter validation/guardrails
 - Robust diff merging on server (multi-edit merging) and generalized path→Instance resolution
-- Asset Catalog integration and GPU 3D generation → Open Cloud upload
-- Rich plugin UI: full diff preview, open file on apply, improved status/streaming
-- Persistence: proposals store, audit logs, optional DB/schema
+- Asset Catalog integration (real Catalog API instead of stub) and GPU 3D generation → Open Cloud upload
+- Rich plugin UI: full diff preview (line-by-line, deletions/edits), improved status/streaming, thumbnails for assets
+- Persistence: move from file-backed JSON to a durable DB/schema (e.g., SQLite/Prisma), richer auditing and listing endpoints (filter by projectId)
 - Packaging/deploy: Vercel hosting, domain allowlisting in Studio
 
 Needs from you
@@ -938,12 +949,13 @@ Note on cline_openai.md
 ### Notes and next steps
 
 - Known limitations in this increment:
-  - Diff preview is a simple snippet; we still need a full diff renderer
+  - Diff renderer falls back to a simplified mode for very large files; multi-edit diffs are supported but may be slower on very large scripts
   - Edits merging handles the current insertion case well, but not complex multi‑edit scenarios yet
-  - Asset search proposals are listed but not actionable yet (no asset picker UI)
+  - Asset search uses stubbed backend data and shows a text list (no thumbnails yet)
+  - Plan/Act is a single additional step (context tool then actionable tool); a full multi-turn loop remains
 - Recommended follow‑ups:
-  - Implement full diff preview and “open file on apply”
-  - Add asset search results UI and insert flow
-  - Persist proposals/audit records on the server
+  - Optimize diff computation for very large scripts; consider server-side precomputation for proposals with many edits
+  - Add real Catalog integration on the server and show thumbnails in the plugin UI
+  - Persist proposals/audit records in a durable store and add filtering endpoints
   - Move to Vercel and add the hosted domain to Studio’s allowed list
-  - Add provider tool‑call parsing for real tool‑driven Plan/Act execution
+  - Expand provider tool‑call parsing into a full multi-turn Plan/Act execution loop with guardrails and retries

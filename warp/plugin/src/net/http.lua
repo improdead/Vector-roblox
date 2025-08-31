@@ -9,7 +9,16 @@ local function postJson(url, body)
 	})
 end
 
+local function getJson(url)
+	return HttpService:RequestAsync({
+		Url = url,
+		Method = "GET",
+		Headers = { ["Content-Type"] = "application/json" },
+	})
+end
+
 return {
 	postJson = postJson,
+	getJson = getJson,
 }
 

@@ -1,10 +1,12 @@
 export const runtime = 'nodejs'
 
+import { searchRobloxCatalog } from '../../../../lib/catalog/search'
+
 export async function GET(req: Request) {
   const { searchParams } = new URL(req.url)
-  const q = searchParams.get('q') || ''
-  const limit = Number(searchParams.get('limit') || '8')
-  // TODO: Hook up to Roblox Catalog via backend integration
-  return Response.json({ results: [], q, limit })
-}
+  const query = searchParams.get('query') || searchParams.get('q') || ''
+  const limit = Math.max(1, Math.min(50, Number(searchParams.get('limit') || '8')))
 
+  const results = await searchRobloxCatalog(query, limit)
+  return Response.json({ results, query, limit })
+}

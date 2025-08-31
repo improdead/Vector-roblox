@@ -3,16 +3,24 @@ import { z } from 'zod'
 export const EditRange = z.object({ line: z.number(), character: z.number() })
 export const Edit = z.object({ start: EditRange, end: EditRange, text: z.string() })
 
+const ParentEither = z
+  .object({ parentPath: z.string() })
+  .or(z.object({ parent: z.string() }))
+  .transform((v) => ('parentPath' in v ? v : { parentPath: (v as any).parent }))
+
 export const Tools = {
   get_active_script: z.object({}),
   list_selection: z.object({}),
   list_open_documents: z.object({}),
   show_diff: z.object({ path: z.string(), edits: z.array(Edit) }),
   apply_edit: z.object({ path: z.string(), edits: z.array(Edit) }),
-  create_instance: z.object({ className: z.string(), parent: z.string(), props: z.record(z.any()).optional() }),
+  create_instance: z
+    .object({ className: z.string(), props: z.record(z.any()).optional() })
+    .and(ParentEither),
   set_properties: z.object({ path: z.string(), props: z.record(z.any()) }),
   search_assets: z.object({ query: z.string(), tags: z.array(z.string()).optional(), limit: z.number().min(1).max(50).optional() }),
   insert_asset: z.object({ assetId: z.number(), parentPath: z.string().optional() }),
+  generate_asset_3d: z.object({ prompt: z.string(), tags: z.array(z.string()).optional(), style: z.string().optional(), budget: z.number().optional() }),
 }
 export type ToolsShape = typeof Tools
 
