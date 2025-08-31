@@ -46,6 +46,7 @@ import { callOpenRouter } from './providers/openrouter'
 import { z } from 'zod'
 import { Tools } from '../tools/schemas'
 import { getSession, setLastTool } from '../store/sessions'
+import { applyRangeEdits, simpleUnifiedDiff } from '../diff/rangeEdits'
 
 const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
 Proposal-first. One tool per message.
@@ -124,7 +125,10 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
     const path = ensurePath(input.context.activeScript?.path || null)
     const edits = toEditArray((a as any).edits)
     if (path && edits) {
-      proposals.push({ id: id('edit'), type: 'edit', path, notes: `Parsed from ${name}`, diff: { mode: 'rangeEDITS', edits } })
+      const old = input.context.activeScript?.text || ''
+      const next = applyRangeEdits(old, edits)
+      const unified = simpleUnifiedDiff(old, next, path)
+      proposals.push({ id: id('edit'), type: 'edit', path, notes: `Parsed from ${name}`, diff: { mode: 'rangeEDITS', edits }, preview: { unified } } as any)
       return proposals
     }
   }
@@ -185,9 +189,8 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   const msg = input.message.trim()
 
   let providerContent: string | undefined
-  const useProvider =
-    (input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey) ||
-    process.env.VECTOR_USE_OPENROUTER === '1'
+  const providerRequested = !!(input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey)
+  const useProvider = providerRequested || process.env.VECTOR_USE_OPENROUTER === '1'
   if (useProvider) {
     try {
       const resp = await callOpenRouter({
@@ -199,12 +202,18 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       })
       providerContent = resp.content || ''
     } catch (e: any) {
+      if (providerRequested) {
+        throw new Error(`Provider error: ${e?.message || 'unknown'}`)
+      }
       providerContent = undefined
     }
   }
 
   // If provider returned a tool-call, parse and map to proposals
   const tool = providerContent ? parseToolXML(providerContent) : null
+  if (providerRequested && !tool) {
+    throw new Error('Provider returned no parseable tool call')
+  }
   if (tool) {
     const name = tool.name as keyof typeof Tools
     let a: Record<string, any> = tool.args || {}
@@ -273,15 +282,18 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   if (input.context.activeScript) {
     const path = input.context.activeScript.path
     const prefixComment = `-- Vector: ${sanitizeComment(msg)}\n`
-    return [
-      {
-        id: id('edit'),
-        type: 'edit',
-        path,
-        notes: providerContent ? 'Provider response did not include a valid tool call; generated fallback edit.' : 'Insert a comment at the top as a placeholder for an edit.',
-        diff: { mode: 'rangeEDITS', edits: [{ start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, text: prefixComment }] },
-      },
-    ]
+    const edits = [{ start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, text: prefixComment }]
+    const old = input.context.activeScript.text
+    const next = applyRangeEdits(old, edits)
+    const unified = simpleUnifiedDiff(old, next, path)
+    return [{
+      id: id('edit'),
+      type: 'edit',
+      path,
+      notes: providerContent ? 'Provider response did not include a valid tool call; generated fallback edit.' : 'Insert a comment at the top as a placeholder for an edit.',
+      diff: { mode: 'rangeEDITS', edits },
+      preview: { unified },
+    } as any]
   }
 
   if (input.context.selection && input.context.selection.length > 0) {

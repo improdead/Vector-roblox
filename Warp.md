@@ -862,7 +862,9 @@ Recent updates
 - Added zod-based validation of provider tool-call arguments before mapping to proposals
 - Added Plan/Act scaffold: executes context tools locally and performs a second provider call for the next actionable tool
 - Switched proposals store to file-backed JSON durability (apps/web/data/proposals.json)
-- Introduced Catalog provider interface (env CATALOG_API_URL) for real search; stub remains fallback
+- Catalog provider interface via CATALOG_API_URL — no stub fallback; explicit 502 errors on failure
+- Server-side diff preview shaping (unified diff) added to edit proposals; plugin renders preview snippet
+- Provider errors now surfaced (no fallback when provider is configured via Settings); errors bubble to plugin UI
 
 Decisions captured
 
@@ -878,8 +880,8 @@ Working now
 
 - Web (Next.js + npm)
   - Local app scaffold (Next 14) with npm scripts; landing page at /.
-  - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search uses a provider interface (real via CATALOG_API_URL or stub); /api/assets/generate3d returns a stub jobId.
-  - Provider tool-call parsing (OpenRouter) behind flags: when VECTOR_USE_OPENROUTER=1, model outputs exactly one XML-like tool call which is parsed and mapped to proposals. Arguments are validated with zod before mapping. Falls back to safe proposals if parsing fails.
+  - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search calls a Catalog provider (CATALOG_API_URL required; no fallback); /api/assets/generate3d returns a stub jobId.
+  - Provider tool-call parsing (OpenRouter) behind flags or per-request Settings: model outputs exactly one XML-like tool call which is parsed and mapped to proposals. Arguments validated with zod; when provider is configured, errors are surfaced (no fallback).
   - Plan/Act scaffold behind VECTOR_PLAN_ACT=1: if the first tool is a context tool (get_active_script, list_selection, list_open_documents), we execute it locally from the provided context, store the result in a short session, and issue a second provider call using that result to get the next actionable tool.
   - Provider adapters present: openrouter.ts (call path), openai.ts (stub).
 - Plugin (Vector)
@@ -887,20 +889,19 @@ Working now
   - Approve/Reject per proposal; applies:
     - edit proposals that insert text via rangeEDITS (merged, UpdateSourceAsync with undo)
     - object_op rename_instance (ChangeHistoryService wrapped)
-  - Added "Apply & Open" for edit proposals (opens the script after a successful apply).
-  - Asset search flow: Browse button fetches /api/assets/search results → Inline list with Insert buttons → inserts via InsertService.
+  - Settings panel: Base URL, API Key, Model ID; per-request provider used by /api/chat.
   - Reports apply results back to /api/proposals/:id/apply for auditing.
-  - Simple diff preview snippet (shows inserted text).
+  - Diff preview snippet: shows unified diff from server for quick review.
 
 Configured locally
 
 - Environment
-  - warp/apps/web/.env present with OPENROUTER_API_KEY (provided) and OPENROUTER_MODEL=moonshotai/kimi-k2:free (default).
-  - VECTOR_USE_OPENROUTER=0 by default; set to 1 to enable provider-driven tool-call parsing.
+  - Use plugin Settings for provider credentials; env not required for local testing.
+  - VECTOR_USE_OPENROUTER=0 by default; set to 1 to enable provider-driven tool-call parsing without passing Settings.
   - VECTOR_PLAN_ACT=0 by default; set to 1 to enable a second provider call after context tools (Plan/Act scaffold).
-- CATALOG_API_URL optional: when set, /api/assets/search calls this URL to fetch normalized results; otherwise it uses a stub list.
+  - CATALOG_API_URL optional: when set, /api/assets/search calls this URL to fetch normalized results; otherwise it uses a stub list.
   - Data directory: proposals are persisted to apps/web/data/proposals.json (auto-created on write).
-  - Do not commit .env to version control.
+  - Do not commit .env to version control (ignored). Provider keys live only in plugin Settings.
 
 Not yet implemented (next milestones)
 
@@ -923,10 +924,7 @@ Needs from you
 
 Recommended next steps (proposed M0 path)
 
-1) Verify npm install in warp/apps/web and run the local dev server (npm run dev)
-2) Wire the plugin to collect context (active script + selection) and POST to /api/chat
-3) Implement diff preview data shaping on server (no writes), then renderable in plugin UI
-4) Integrate OpenRouter provider call path behind a feature flag and progressively build tool-call parsing
+1) Verify npm install in warp/apps/web and run the local dev server (npm run dev) — pending verification
 
 Note on cline_openai.md
 

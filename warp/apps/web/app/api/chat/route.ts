@@ -36,10 +36,12 @@ export async function POST(req: Request) {
 
     return Response.json({ proposals })
   } catch (err: any) {
-    console.error('chat handler error', err)
-    return new Response(
-      JSON.stringify({ error: err?.message || 'Invalid request' }),
-      { status: 400, headers: { 'content-type': 'application/json' } },
-    )
+    const msg = err?.message || 'Unknown error'
+    const status = /invalid/i.test(msg) ? 400 : 500
+    console.error('chat handler error', msg)
+    return new Response(JSON.stringify({ error: msg }), {
+      status,
+      headers: { 'content-type': 'application/json' },
+    })
   }
 }

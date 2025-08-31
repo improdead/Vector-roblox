@@ -518,8 +518,10 @@ local function renderProposals(list, proposals)
 		snippet.Size = UDim2.new(1, -8, 0, 28)
 		snippet.Position = UDim2.new(0, 8, 0, 30)
 		snippet.TextWrapped = true
-		if p.type == "edit" and p.diff and p.diff.edits and p.diff.edits[1] then
-			snippet.Text = "Insert: " .. string.sub(p.diff.edits[1].text or "", 1, 120)
+		if p.type == "edit" and p.preview and p.preview.unified then
+			snippet.Text = string.sub(p.preview.unified, 1, 300)
+		elseif p.type == "edit" and p.diff and p.diff.edits and p.diff.edits[1] then
+			snippet.Text = "Insert: " .. string.sub(p.diff.edits[1].text or "", 1, 200)
 		elseif p.type == "object_op" and p.ops and p.ops[1] and p.ops[1].op == "rename_instance" then
 			snippet.Text = "Rename → " .. tostring(p.ops[1].newName)
 		else
@@ -706,26 +708,36 @@ toggleButton.Click:Connect(function()
 			selection = getSelectionContext(),
 		}
 		local resp = sendChat("local", input.Text, ctx)
-		if not resp.Success then
-			local item = Instance.new("TextLabel")
-			item.Size = UDim2.new(1, -8, 0, 24)
-			item.Text = "HTTP error: " .. tostring(resp.StatusCode)
-			item.BackgroundTransparency = 1
-			item.Parent = list
-			return
-		end
-		local ok, parsed = pcall(function()
-			return HttpService:JSONDecode(resp.Body)
-		end)
-		if not ok then
-			local item = Instance.new("TextLabel")
-			item.Size = UDim2.new(1, -8, 0, 24)
-			item.Text = "Invalid JSON from server"
-			item.BackgroundTransparency = 1
-			item.Parent = list
-			return
-		end
-		renderProposals(list, parsed.proposals or {})
+    if not resp.Success then
+        local item = Instance.new("TextLabel")
+        item.Size = UDim2.new(1, -8, 0, 48)
+        item.TextWrapped = true
+        item.Text = "HTTP " .. tostring(resp.StatusCode) .. ": " .. (resp.Body or "")
+        item.BackgroundTransparency = 1
+        item.Parent = list
+        return
+    end
+    local ok, parsed = pcall(function()
+        return HttpService:JSONDecode(resp.Body)
+    end)
+    if not ok then
+        local item = Instance.new("TextLabel")
+        item.Size = UDim2.new(1, -8, 0, 24)
+        item.Text = "Invalid JSON from server"
+        item.BackgroundTransparency = 1
+        item.Parent = list
+        return
+    end
+    if parsed.error then
+        local item = Instance.new("TextLabel")
+        item.Size = UDim2.new(1, -8, 0, 48)
+        item.TextWrapped = true
+        item.Text = "Error: " .. tostring(parsed.error)
+        item.BackgroundTransparency = 1
+        item.Parent = list
+        return
+    end
+    renderProposals(list, parsed.proposals or {})
 	end)
 end)
 
