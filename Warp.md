@@ -7,7 +7,7 @@
 ## 0) What this is
 
 * **Studio Plugin (Luau)**: docked chat + proposals, reads active editor state, previews diffs, applies edits inside **ChangeHistoryService**.
-* **Next.js Backend (TypeScript)**: `/api/chat`, `/api/stream`, `/api/proposals/:id/apply`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM.
+* **Next.js Backend (TypeScript)**: `/api/chat`, `/api/proposals/:id/apply`, `/api/proposals`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM.
 * **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval.
 
 ---
@@ -276,8 +276,7 @@ end
 
 ## 6) Streaming & transport
 
-* **Plugin**: default to **short polling** or **long‑polling** `/api/stream?cursor=…`. If SSE is available and reliable in your environment, the plugin can use it; otherwise keep long‑poll.
-* **Web dashboard**: use SSE for token‑level streaming.
+* Streaming: not implemented in this increment. Use request/response for now.
 * Limit concurrent plugin HTTP requests (≤2) to avoid Studio’s in‑flight cap.
 
 ---
@@ -328,7 +327,7 @@ flowchart TD
     subgraph Studio Plugin (Luau)
         A[User asks] --> B[Collect context\nGetEditorSource + Selection]
         B --> C[/api/chat]
-        J[Stream/Long-poll /api/stream] --> K[Render partial tokens]
+        %% Streaming omitted in this increment
         C -->|proposals| D[Diff/Operations UI]
         D --> E{Approve?}
         E -- Yes: edits --> F[TryBeginRecording\nUpdateSourceAsync\nFinishRecording]
@@ -460,7 +459,7 @@ flowchart LR
     end
 
     subgraph Backend["Next.js Orchestrator (Vercel)"]
-        ROUTES[/api/chat • /api/stream* • /api/assets/search • /api/proposals/:id/apply/]
+        ROUTES[/api/chat • /api/assets/search • /api/proposals/:id/apply/ • /api/proposals]
         ORCH[Tool‑Calling Orchestrator]
         PROVIDERS[OpenRouter / OpenAI / Anthropic]
         STORE[(DB • Cache • Audit Logs)]
@@ -480,7 +479,7 @@ flowchart LR
     GEN3D --> GPU --> OPENCLOUD --> ORCH
     ROUTES --> CATALOG
 
-    %% Notes: * Studio plugins cannot use SSE/WebSockets. Use short/long‑polling.
+    %% Notes: Streaming/SSE not implemented in this increment.
 ```
 
 **Key points**
@@ -849,115 +848,15 @@ warp/
 
 - Docked chat UI, context capture, HTTP permission flow — implemented
 - `/api/chat` round-trip producing `edit` and `object_op` proposals — implemented
-- Diff preview + one-click **Apply** (single undo step) — full unified diff renderer implemented; shows context, additions/deletions, multiple hunks, with Open/Close Diff toggle
-- Asset search + insert flow — implemented (server stub + plugin Browse + Insert)
+- Diff preview + one-click **Apply** (single undo step) — basic unified diff snippet attached by server; minimal preview in plugin
+- Asset search API — implemented (requires CATALOG_API_URL); plugin UI not implemented in this increment
 - Audit log of proposals and outcomes — implemented with file-backed JSON durability and apply acknowledgements
 
 ---
 
-## Implementation Progress — 2025-08-31 (updated @ 21:06 UTC)
+## Implementation Status
 
-Recent updates
-
-- Added zod-based validation of provider tool-call arguments before mapping to proposals
-- Added Plan/Act scaffold: executes context tools locally and performs a second provider call for the next actionable tool
-- Switched proposals store to file-backed JSON durability (apps/web/data/proposals.json)
-- Catalog provider interface via CATALOG_API_URL — no stub fallback; explicit 502 errors on failure
-- Server-side diff preview shaping (unified diff) added to edit proposals; plugin renders preview snippet
-- Provider errors now surfaced (no fallback when provider is configured via Settings); errors bubble to plugin UI
-
-Decisions captured
-
-- AI name: Vector (assistant name in UI and comments)
-- LLM provider: OpenRouter, model: moonshotai/kimi-k2:free
-- Package manager: npm
-- Hosting: Local dev at http://127.0.0.1:3000 for now. We will move to Vercel (or similar) later.
-- Domain permissions: local-only for now; will add hosted domain later when deploying.
-- Plugin install workflow: Rojo during development → export .rbxm for small tester group → publish to Marketplace for public release.
-- System prompt: refined Vector prompt (one-tool-per-message, proposal-first, minimal diffs).
-
-Working now
-
-- Web (Next.js + npm)
-  - Local app scaffold (Next 14) with npm scripts; landing page at /.
-  - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search calls a Catalog provider (CATALOG_API_URL required; no fallback); /api/assets/generate3d returns a stub jobId.
-  - Provider tool-call parsing (OpenRouter) behind flags or per-request Settings: model outputs exactly one XML-like tool call which is parsed and mapped to proposals. Arguments validated with zod; when provider is configured, errors are surfaced (no fallback).
-  - Plan/Act scaffold behind VECTOR_PLAN_ACT=1: if the first tool is a context tool (get_active_script, list_selection, list_open_documents), we execute it locally from the provided context, store the result in a short session, and issue a second provider call using that result to get the next actionable tool.
-  - Provider adapters present: openrouter.ts (call path), openai.ts (stub).
-- Plugin (Vector)
-  - Dock UI with input + Send. Sends context (active script + selection) to /api/chat and renders proposals.
-  - Approve/Reject per proposal; applies:
-    - edit proposals that insert text via rangeEDITS (merged, UpdateSourceAsync with undo)
-    - object_op rename_instance (ChangeHistoryService wrapped)
-  - Settings panel: Base URL, API Key, Model ID; per-request provider used by /api/chat.
-  - Reports apply results back to /api/proposals/:id/apply for auditing.
-  - Diff preview snippet: shows unified diff from server for quick review.
-
-Configured locally
-
-- Environment
-  - Use plugin Settings for provider credentials; env not required for local testing.
-  - VECTOR_USE_OPENROUTER=0 by default; set to 1 to enable provider-driven tool-call parsing without passing Settings.
-  - VECTOR_PLAN_ACT=0 by default; set to 1 to enable a second provider call after context tools (Plan/Act scaffold).
-  - CATALOG_API_URL optional: when set, /api/assets/search calls this URL to fetch normalized results; otherwise it uses a stub list.
-  - Data directory: proposals are persisted to apps/web/data/proposals.json (auto-created on write).
-  - Do not commit .env to version control (ignored). Provider keys live only in plugin Settings.
-
-Not yet implemented (next milestones)
-
-- Provider-driven tool-call execution loop (multi-turn Plan/Act with context tools) and stricter validation/guardrails
-- Robust diff merging on server (multi-edit merging) and generalized path→Instance resolution
-- Asset Catalog integration (real Catalog API instead of stub) and GPU 3D generation → Open Cloud upload
-- Rich plugin UI: full diff preview (line-by-line, deletions/edits), improved status/streaming, thumbnails for assets
-- Persistence: move from file-backed JSON to a durable DB/schema (e.g., SQLite/Prisma), richer auditing and listing endpoints (filter by projectId)
-- Packaging/deploy: Vercel hosting, domain allowlisting in Studio
-
-Needs from you
-
-- Approvals to proceed:
-  - Wire plugin context capture to POST /api/chat and display proposals in the Vector dock.
-  - Implement diff preview UI with Approve/Reject and undo semantics.
-  - Enable the provider-backed path (OpenRouter) and tool-call parsing after initial local verification.
-- Later (not blocking M0/M1):
-  - Roblox Open Cloud credentials for 3D generation and asset uploads (generate3d flows).
-  - Catalog API integration details/keys if we query Roblox web APIs server‑side (optional).
-
-Recommended next steps (proposed M0 path)
-
-1) Verify npm install in warp/apps/web and run the local dev server (npm run dev) — pending verification
-
-Note on cline_openai.md
-
-- Populated with a concise Vector system prompt (Cline‑style). We will refine it as the tool registry and execution loop evolve.
-
-### How to run locally
-
-- Web (from a new terminal):
-  - cd warp/apps/web
-  - npm install
-  - Ensure your .env or .env.local contains OPENROUTER_API_KEY and OPENROUTER_MODEL=moonshotai/kimi-k2:free
-  - Optional: set VECTOR_USE_OPENROUTER=1 to attach provider notes
-  - npm run dev
-- In Roblox Studio:
-  - Load the plugin (via Rojo or by placing the plugin folder)
-  - Click the Vector toolbar button to open the dock
-  - Click "Vector Settings" to enter your provider info (OpenRouter-compatible). Use Base URL `https://openrouter.ai/api/v1`, paste your API Key, and choose a Model ID (e.g., `moonshotai/kimi-k2:free`). Saved locally via plugin settings.
-  - Type a message, click Send
-  - Approve/Reject proposals; edits and rename ops will apply as described
-
-### Notes and next steps
-
-- Known limitations in this increment:
-  - Diff renderer falls back to a simplified mode for very large files; multi-edit diffs are supported but may be slower on very large scripts
-  - Edits merging handles the current insertion case well, but not complex multi‑edit scenarios yet
-  - Asset search uses stubbed backend data and shows a text list (no thumbnails yet)
-  - Plan/Act is a single additional step (context tool then actionable tool); a full multi-turn loop remains
-- Recommended follow‑ups:
-  - Optimize diff computation for very large scripts; consider server-side precomputation for proposals with many edits
-  - Add real Catalog integration on the server and show thumbnails in the plugin UI
-  - Persist proposals/audit records in a durable store and add filtering endpoints
-  - Move to Vercel and add the hosted domain to Studio’s allowed list
-  - Expand provider tool‑call parsing into a full multi-turn Plan/Act execution loop with guardrails and retries
+Moved to docs/IMPLEMENTATION_STATUS.md for clarity and maintenance.
 
 ---
 
