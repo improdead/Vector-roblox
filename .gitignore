@@ -8,6 +8,7 @@ warp/apps/web/.env.local
 warp/apps/web/.env.*
 
 # Local data store
+warp/apps/web/data/
 data/
 
 # macOS

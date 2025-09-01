@@ -407,9 +407,15 @@ local function buildUI(gui)
 	textBox.PlaceholderText = "Ask Vector…"
 	textBox.Text = ""
 	textBox.ClearTextOnFocus = false
-	textBox.Size = UDim2.new(1, -84, 1, -8)
+	textBox.Size = UDim2.new(1, -120, 1, -8)
 	textBox.Position = UDim2.new(0, 4, 0, 4)
 	textBox.Parent = inputRow
+
+	local settingsBtn = Instance.new("TextButton")
+	settingsBtn.Text = "⚙"
+	settingsBtn.Size = UDim2.new(0, 32, 1, -8)
+	settingsBtn.Position = UDim2.new(1, -116, 0, 4)
+	settingsBtn.Parent = inputRow
 
 	local sendBtn = Instance.new("TextButton")
 	sendBtn.Text = "Send"
@@ -431,7 +437,7 @@ local function buildUI(gui)
 	layout.Padding = UDim.new(0, 6)
 	layout.Parent = list
 
-	return textBox, sendBtn, list
+	return textBox, sendBtn, list, settingsBtn
 end
 
 local function renderAssetResults(container, p, results)
@@ -700,7 +706,12 @@ toggleButton.Click:Connect(function()
 	local gui = plugin:CreateDockWidgetPluginGui("VectorDock", info)
 	gui.Title = "Vector"
 
-	local input, sendBtn, list = buildUI(gui)
+	local input, sendBtn, list, settingsBtn = buildUI(gui)
+
+	-- Open in-dock settings popup
+	settingsBtn.MouseButton1Click:Connect(function()
+		openSettings()
+	end)
 
 	sendBtn.MouseButton1Click:Connect(function()
 		local ctx = {
@@ -791,30 +802,86 @@ local function openSettings()
         return t
     end
 
-    local cfg = loadProviderSettings()
-    mkLabel("API Provider: OpenAI Compatible (OpenRouter)", 12)
-    mkLabel("Base URL", 42)
-    local baseInput = mkInput(62)
-    baseInput.Text = cfg.baseUrl
+	local cfg = loadProviderSettings()
+	mkLabel("Provider (OpenAI-compatible)", 12)
+	local providerLbl = Instance.new("TextLabel")
+	providerLbl.Text = "OpenRouter (fixed for now)"
+	providerLbl.TextXAlignment = Enum.TextXAlignment.Left
+	providerLbl.BackgroundTransparency = 1
+	providerLbl.Position = UDim2.new(0, 12, 0, 32)
+	providerLbl.Size = UDim2.new(1, -24, 0, 20)
+	providerLbl.Parent = root
 
-    mkLabel("API Key", 98)
-    local keyInput = mkInput(118)
-    keyInput.Text = cfg.apiKey
+	mkLabel("Base URL", 58)
+	local baseInput = mkInput(78)
+	baseInput.Text = cfg.baseUrl
 
-    mkLabel("Model ID", 154)
-    local modelInput = mkInput(174)
-    modelInput.Text = cfg.model
+	mkLabel("API Key", 114)
+	local keyInput = mkInput(134)
+	keyInput.Text = cfg.apiKey
 
-    local saveBtn = Instance.new("TextButton")
-    saveBtn.Text = "Done"
-    saveBtn.Size = UDim2.new(0, 96, 0, 28)
-    saveBtn.Position = UDim2.new(1, -108, 1, -40)
-    saveBtn.Parent = root
-    saveBtn.MouseButton1Click:Connect(function()
-        saveProviderSettings({ baseUrl = baseInput.Text, apiKey = keyInput.Text, model = modelInput.Text })
-        gui.Enabled = false
-        gui:Destroy()
-    end)
+	mkLabel("Model", 170)
+	local modelInput = mkInput(190)
+	modelInput.Text = cfg.model
+
+	-- Quick preset for Kimi K2
+	local presetBtn = Instance.new("TextButton")
+	presetBtn.Text = "Use Kimi K2 (recommended)"
+	presetBtn.Size = UDim2.new(0, 220, 0, 24)
+	presetBtn.Position = UDim2.new(0, 12, 0, 222)
+	presetBtn.Parent = root
+	presetBtn.MouseButton1Click:Connect(function()
+		modelInput.Text = "moonshotai/kimi-k2:free"
+	end)
+
+	-- Internal testing note
+	local note = Instance.new("TextLabel")
+	note.Text = "Note: For internal testing only. Your API key is stored locally via plugin:SetSetting and not committed."
+	note.TextWrapped = true
+	note.TextXAlignment = Enum.TextXAlignment.Left
+	note.BackgroundTransparency = 1
+	note.Position = UDim2.new(0, 12, 0, 252)
+	note.Size = UDim2.new(1, -24, 0, 40)
+	note.TextColor3 = Color3.fromRGB(180, 180, 180)
+	note.Parent = root
+
+	-- Test button
+	local testBtn = Instance.new("TextButton")
+	testBtn.Text = "Test"
+	testBtn.Size = UDim2.new(0, 96, 0, 28)
+	testBtn.Position = UDim2.new(1, -216, 1, -40)
+	testBtn.Parent = root
+	testBtn.MouseButton1Click:Connect(function()
+		testBtn.Text = "Testing…"
+		local resp = sendChat("settings_test", "Ping from Settings", { activeScript = nil, selection = {} })
+		if not resp.Success then
+			testBtn.Text = "HTTP " .. tostring(resp.StatusCode)
+			return
+		end
+		local ok, parsed = pcall(function()
+			return HttpService:JSONDecode(resp.Body)
+		end)
+		if not ok or parsed.error then
+			testBtn.Text = "Error"
+		else
+			testBtn.Text = "OK"
+		end
+		-- reset after short delay
+		task.delay(2, function()
+			testBtn.Text = "Test"
+		end)
+	end)
+
+	local saveBtn = Instance.new("TextButton")
+	saveBtn.Text = "Done"
+	saveBtn.Size = UDim2.new(0, 96, 0, 28)
+	saveBtn.Position = UDim2.new(1, -108, 1, -40)
+	saveBtn.Parent = root
+	saveBtn.MouseButton1Click:Connect(function()
+		saveProviderSettings({ baseUrl = baseInput.Text, apiKey = keyInput.Text, model = modelInput.Text })
+		gui.Enabled = false
+		gui:Destroy()
+	end)
 end
 
 settingsButton.Click:Connect(function()
