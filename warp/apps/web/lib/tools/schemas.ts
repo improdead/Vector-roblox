@@ -18,9 +18,10 @@ export const Tools = {
     .object({ className: z.string(), props: z.record(z.any()).optional() })
     .and(ParentEither),
   set_properties: z.object({ path: z.string(), props: z.record(z.any()) }),
+  rename_instance: z.object({ path: z.string(), newName: z.string() }),
+  delete_instance: z.object({ path: z.string() }),
   search_assets: z.object({ query: z.string(), tags: z.array(z.string()).optional(), limit: z.number().min(1).max(50).optional() }),
   insert_asset: z.object({ assetId: z.number(), parentPath: z.string().optional() }),
   generate_asset_3d: z.object({ prompt: z.string(), tags: z.array(z.string()).optional(), style: z.string().optional(), budget: z.number().optional() }),
 }
 export type ToolsShape = typeof Tools
-

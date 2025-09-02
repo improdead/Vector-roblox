@@ -122,6 +122,24 @@ These are the server‑registered tools exposed to the LLM. Keep schemas strict 
       }
     },
     {
+      "name": "rename_instance",
+      "description": "Rename an Instance by its full path.",
+      "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}, "newName": {"type": "string"}},
+        "required": ["path", "newName"]
+      }
+    },
+    {
+      "name": "delete_instance",
+      "description": "Delete an Instance by its full path.",
+      "parameters": {
+        "type": "object",
+        "properties": {"path": {"type": "string"}},
+        "required": ["path"]
+      }
+    },
+    {
       "name": "search_assets",
       "description": "Search the Roblox catalog for assets (server-side).",
       "parameters": {
@@ -245,7 +263,7 @@ end
 
 **Server (Next.js)**
 
-* `GET /api/assets/search?query=…&tags=…&limit=…` — Catalog search (server‑side). Also accepts legacy `q` as alias for `query`. Normalize results to `{ id, name, creator, type, thumbnailUrl }`.
+* `GET /api/assets/search?query=…&tags=…&limit=…` — Catalog search (server‑side). Also accepts legacy `q` as alias for `query`. Normalize results to `{ id, name, creator, type, thumbnailUrl }`. If `CATALOG_API_URL` is not set, returns a small stubbed list for local dev.
 * Optionally cache by `query` and tags.
 
 **Plugin (Luau)**
@@ -688,6 +706,8 @@ export const tools = {
   },
   create_instance: { params: { className: 'string', parentPath: 'string', props: 'record' } },
   set_properties: { params: { path: 'string', props: 'record' } },
+  rename_instance: { params: { path: 'string', newName: 'string' } },
+  delete_instance: { params: { path: 'string' } },
   search_assets: { params: { query: 'string', tags: ['string?'], limit: 'int?' } },
   insert_asset: { params: { assetId: 'number', parentPath: 'string' } },
 }
@@ -893,71 +913,6 @@ Working now
   - Reports apply results back to /api/proposals/:id/apply for auditing.
   - Diff preview snippet: shows unified diff from server for quick review.
 
-Configured locally
-
-- Environment
-  - Use plugin Settings for provider credentials; env not required for local testing.
-  - VECTOR_USE_OPENROUTER=0 by default; set to 1 to enable provider-driven tool-call parsing without passing Settings.
-  - VECTOR_PLAN_ACT=0 by default; set to 1 to enable a second provider call after context tools (Plan/Act scaffold).
-  - CATALOG_API_URL optional: when set, /api/assets/search calls this URL to fetch normalized results; otherwise it uses a stub list.
-  - Data directory: proposals are persisted to apps/web/data/proposals.json (auto-created on write).
-  - Do not commit .env to version control (ignored). Provider keys live only in plugin Settings.
-
-Not yet implemented (next milestones)
-
-- Provider-driven tool-call execution loop (multi-turn Plan/Act with context tools) and stricter validation/guardrails
-- Robust diff merging on server (multi-edit merging) and generalized path→Instance resolution
-- Asset Catalog integration (real Catalog API instead of stub) and GPU 3D generation → Open Cloud upload
-- Rich plugin UI: full diff preview (line-by-line, deletions/edits), improved status/streaming, thumbnails for assets
-- Persistence: move from file-backed JSON to a durable DB/schema (e.g., SQLite/Prisma), richer auditing and listing endpoints (filter by projectId)
-- Packaging/deploy: Vercel hosting, domain allowlisting in Studio
-
-Needs from you
-
-- Approvals to proceed:
-  - Wire plugin context capture to POST /api/chat and display proposals in the Vector dock.
-  - Implement diff preview UI with Approve/Reject and undo semantics.
-  - Enable the provider-backed path (OpenRouter) and tool-call parsing after initial local verification.
-- Later (not blocking M0/M1):
-  - Roblox Open Cloud credentials for 3D generation and asset uploads (generate3d flows).
-  - Catalog API integration details/keys if we query Roblox web APIs server‑side (optional).
-
-Recommended next steps (proposed M0 path)
-
-1) Verify npm install in warp/apps/web and run the local dev server (npm run dev) — pending verification
-
-Note on cline_openai.md
-
-- Populated with a concise Vector system prompt (Cline‑style). We will refine it as the tool registry and execution loop evolve.
-
-### How to run locally
-
-- Web (from a new terminal):
-  - cd warp/apps/web
-  - npm install
-  - Ensure your .env or .env.local contains OPENROUTER_API_KEY and OPENROUTER_MODEL=moonshotai/kimi-k2:free
-  - Optional: set VECTOR_USE_OPENROUTER=1 to attach provider notes
-  - npm run dev
-- In Roblox Studio:
-  - Load the plugin (via Rojo or by placing the plugin folder)
-  - Click the Vector toolbar button to open the dock
-  - Click "Vector Settings" to enter your provider info (OpenRouter-compatible). Use Base URL `https://openrouter.ai/api/v1`, paste your API Key, and choose a Model ID (e.g., `moonshotai/kimi-k2:free`). Saved locally via plugin settings.
-  - Type a message, click Send
-  - Approve/Reject proposals; edits and rename ops will apply as described
-
-### Notes and next steps
-
-- Known limitations in this increment:
-  - Diff renderer falls back to a simplified mode for very large files; multi-edit diffs are supported but may be slower on very large scripts
-  - Edits merging handles the current insertion case well, but not complex multi‑edit scenarios yet
-  - Asset search uses stubbed backend data and shows a text list (no thumbnails yet)
-  - Plan/Act is a single additional step (context tool then actionable tool); a full multi-turn loop remains
-- Recommended follow‑ups:
-  - Optimize diff computation for very large scripts; consider server-side precomputation for proposals with many edits
-  - Add real Catalog integration on the server and show thumbnails in the plugin UI
-  - Persist proposals/audit records in a durable store and add filtering endpoints
-  - Move to Vercel and add the hosted domain to Studio’s allowed list
-  - Expand provider tool‑call parsing into a full multi-turn Plan/Act execution loop with guardrails and retries
 
 ---
 

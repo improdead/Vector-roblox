@@ -2,8 +2,17 @@ export type CatalogItem = { id: number; name: string; creator: string; type: str
 
 export async function searchRobloxCatalog(query: string, limit: number): Promise<CatalogItem[]> {
   const url = process.env.CATALOG_API_URL
+  // Fallback to stubbed results if no provider URL configured
   if (!url) {
-    throw new Error('CATALOG_API_URL not configured')
+    const q = (query || 'asset').slice(0, 24)
+    const n = Math.max(1, Math.min(50, limit || 8))
+    return Array.from({ length: n }).map((_, i) => ({
+      id: 100000 + i,
+      name: `${q} ${i + 1}`,
+      creator: 'StubCreator',
+      type: i % 3 === 0 ? 'Model' : i % 3 === 1 ? 'Decal' : 'Mesh',
+      thumbnailUrl: undefined,
+    }))
   }
   const res = await fetch(`${url}?query=${encodeURIComponent(query)}&limit=${limit}`)
   if (!res.ok) {
