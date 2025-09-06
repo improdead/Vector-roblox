@@ -52,8 +52,11 @@ const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
 Proposal-first. One tool per message.
 Output EXACTLY ONE tool call in an XML-like format and NOTHING ELSE:
 <tool_name>\n  <param1>...</param1>\n  <param2>...</param2>\n</tool_name>
-Tools: show_diff(path,edits[]), apply_edit(path,edits[]), create_instance(className,parentPath,props), set_properties(path,props), rename_instance(path,newName), delete_instance(path), search_assets(query,tags?,limit?), insert_asset(assetId,parentPath?), generate_asset_3d(prompt,tags?,style?,budget?)
-Rules: minimal diffs; use rangeEDITS {start:{line,character}, end:{line,character}, text}. Reference Paths via Instance:GetFullName()`
+
+Context tools (read-only): get_active_script(), list_selection(), list_open_documents().
+Action tools: show_diff(path,edits[]), apply_edit(path,edits[]), create_instance(className,parentPath,props), set_properties(path,props), rename_instance(path,newName), delete_instance(path), search_assets(query,tags?,limit?), insert_asset(assetId,parentPath?), generate_asset_3d(prompt,tags?,style?,budget?).
+
+Rules: minimal diffs; use rangeEDITS {start:{line,character}, end:{line,character}, text}. Reference Instance paths via GetFullName(). Keep context requests minimal and only when needed.`
 
 function tryParseJSON<T = any>(s: unknown): T | undefined {
   if (typeof s !== 'string') return undefined
@@ -185,97 +188,100 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
 }
 
 export async function runLLM(input: ChatInput): Promise<Proposal[]> {
-  const proposals: Proposal[] = []
   const msg = input.message.trim()
 
-  let providerContent: string | undefined
+  // Provider gating
   const providerRequested = !!(input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey)
   const useProvider = providerRequested || process.env.VECTOR_USE_OPENROUTER === '1'
+
+  // Helper: build tool XML from name/args (for assistant history)
+  const toXml = (name: string, args: Record<string, any>): string => {
+    const parts: string[] = [`<${name}>`]
+    for (const [k, v] of Object.entries(args || {})) {
+      const val = typeof v === 'string' ? v : JSON.stringify(v)
+      parts.push(`  <${k}>${val}</${k}>`)
+    }
+    parts.push(`</${name}>`)
+    return parts.join('\n')
+  }
+
+  // Multi-turn Plan/Act loop
   if (useProvider) {
-    try {
-      const resp = await callOpenRouter({
-        systemPrompt: SYSTEM_PROMPT,
-        messages: [{ role: 'user', content: msg }],
-        model: input.provider?.model,
-        apiKey: input.provider?.apiKey,
-        baseUrl: input.provider?.baseUrl,
-      })
-      providerContent = resp.content || ''
-    } catch (e: any) {
-      if (providerRequested) {
-        throw new Error(`Provider error: ${e?.message || 'unknown'}`)
-      }
-      providerContent = undefined
-    }
-  }
+    const maxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
+    const messages: { role: 'user' | 'assistant'; content: string }[] = [{ role: 'user', content: msg }]
 
-  // If provider returned a tool-call, parse and map to proposals
-  const tool = providerContent ? parseToolXML(providerContent) : null
-  if (providerRequested && !tool) {
-    throw new Error('Provider returned no parseable tool call')
-  }
-  if (tool) {
-    const name = tool.name as keyof typeof Tools
-    let a: Record<string, any> = tool.args || {}
-
-    const ensurePath = (fallback?: string | null): string | undefined => {
-      const p = typeof a.path === 'string' ? a.path : undefined
-      return p || (fallback || undefined)
-    }
-
-    // Fill inferred fields from context before validation (e.g., path)
-    if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
-      a = { ...a, path: input.context.activeScript.path }
-    }
-
-    // zod validation (stricter)
-    const schema = (Tools as any)[name] as z.ZodTypeAny | undefined
-    if (schema) {
-      const parsed = schema.safeParse(a)
-      if (!parsed.success) {
-        // invalid args -> fall back
-      } else {
-        a = parsed.data
-      }
-    }
-
-    // Plan/Act: handle context tools by executing locally and making a second provider call
-    const isContextTool = name === 'get_active_script' || name === 'list_selection' || name === 'list_open_documents'
-    if (isContextTool && process.env.VECTOR_PLAN_ACT === '1' && process.env.VECTOR_USE_OPENROUTER === '1') {
-      const result = name === 'get_active_script'
-        ? (input.context.activeScript || null)
-        : name === 'list_selection'
-          ? (input.context.selection || [])
-          : (input.context.openDocs || [])
-
-      setLastTool(input.projectId, name, result)
-
-      // Second call with tool result appended to prompt
+    for (let turn = 0; turn < maxTurns; turn++) {
+      let content = ''
       try {
-        const followup = await callOpenRouter({
-          systemPrompt: SYSTEM_PROMPT + `\nPrevious tool result for ${name}:` + `\n` + JSON.stringify(result).slice(0, 4000),
-          messages: [{ role: 'user', content: msg }],
+        const resp = await callOpenRouter({
+          systemPrompt: SYSTEM_PROMPT,
+          messages: messages as any,
+          model: input.provider?.model,
+          apiKey: input.provider?.apiKey,
+          baseUrl: input.provider?.baseUrl,
         })
-        const t2 = followup.content ? parseToolXML(followup.content) : null
-        if (t2) {
-          const name2 = t2.name as keyof typeof Tools
-          let a2: Record<string, any> = t2.args || {}
-          if ((name2 === 'show_diff' || name2 === 'apply_edit') && !a2.path && input.context.activeScript?.path) {
-            a2 = { ...a2, path: input.context.activeScript.path }
-          }
-          const schema2 = (Tools as any)[name2] as z.ZodTypeAny | undefined
-          if (schema2) {
-            const parsed2 = schema2.safeParse(a2)
-            if (parsed2.success) a2 = parsed2.data
-          }
-          // Map name2 -> proposals below by reusing mapping
-          return mapToolToProposals(name2 as string, a2, input, msg)
-        }
-      } catch {}
-      // If followup fails, fall through to fallback generation
-    }
+        content = resp.content || ''
+      } catch (e: any) {
+        if (providerRequested) throw new Error(`Provider error: ${e?.message || 'unknown'}`)
+        break
+      }
 
-    return mapToolToProposals(name as string, a, input, msg)
+      const tool = parseToolXML(content)
+      if (!tool) {
+        if (providerRequested) throw new Error('Provider returned no parseable tool call')
+        break
+      }
+
+      const name = tool.name as keyof typeof Tools | string
+      let a: Record<string, any> = tool.args || {}
+
+      // Infer missing fields from context (e.g., path)
+      if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
+        a = { ...a, path: input.context.activeScript.path }
+      }
+
+      // Validate if known tool
+      const schema = (Tools as any)[name as any] as z.ZodTypeAny | undefined
+      if (schema) {
+        const parsed = schema.safeParse(a)
+        if (parsed.success) a = parsed.data
+      }
+
+      // Context tools: execute locally, feed result back, and continue
+      const isContextTool = name === 'get_active_script' || name === 'list_selection' || name === 'list_open_documents'
+      if (isContextTool) {
+        const result = name === 'get_active_script'
+          ? (input.context.activeScript || null)
+          : name === 'list_selection'
+            ? (input.context.selection || [])
+            : (input.context.openDocs || [])
+
+        // Avoid pushing extremely large buffers
+        const safeResult = name === 'get_active_script' && result && typeof (result as any).text === 'string'
+          ? { ...(result as any), text: ((result as any).text as string).slice(0, 40000) }
+          : result
+
+        setLastTool(input.projectId, String(name), safeResult)
+
+        // Append assistant tool call and user tool result to the conversation
+        messages.push({ role: 'assistant', content: toXml(String(name), a) })
+        messages.push({ role: 'user', content: `TOOL_RESULT ${String(name)}\n` + JSON.stringify(safeResult) })
+        continue
+      }
+
+      // Non-context tools → map to proposals and return
+      const mapped = mapToolToProposals(String(name), a, input, msg)
+      if (mapped.length) return mapped
+
+      // If model emitted an unknown planning tag like <plan>, carry it forward and continue
+      if (String(name).toLowerCase() === 'plan') {
+        messages.push({ role: 'assistant', content: toXml(String(name), a) })
+        continue
+      }
+
+      // Otherwise break to fallbacks
+      break
+    }
   }
 
   // Fallbacks: safe, deterministic proposals without provider parsing
@@ -290,7 +296,7 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       id: id('edit'),
       type: 'edit',
       path,
-      notes: providerContent ? 'Provider response did not include a valid tool call; generated fallback edit.' : 'Insert a comment at the top as a placeholder for an edit.',
+      notes: 'Insert a comment at the top as a placeholder for an edit.',
       diff: { mode: 'rangeEDITS', edits },
       preview: { unified },
     } as any]
@@ -302,7 +308,7 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       {
         id: id('obj'),
         type: 'object_op',
-        notes: providerContent ? 'Provider response did not include a valid tool call; generated fallback rename.' : 'Rename selected instance by appending _Warp',
+        notes: 'Rename selected instance by appending _Warp',
         ops: [{ op: 'rename_instance', path: first.path, newName: `${first.path.split('.').pop() || 'Instance'}_Warp` }],
       },
     ]

@@ -902,7 +902,7 @@ Working now
   - Local app scaffold (Next 14) with npm scripts; landing page at /.
   - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search calls a Catalog provider (CATALOG_API_URL required; no fallback); /api/assets/generate3d returns a stub jobId.
   - Provider tool-call parsing (OpenRouter) behind flags or per-request Settings: model outputs exactly one XML-like tool call which is parsed and mapped to proposals. Arguments validated with zod; when provider is configured, errors are surfaced (no fallback).
-  - Plan/Act scaffold behind VECTOR_PLAN_ACT=1: if the first tool is a context tool (get_active_script, list_selection, list_open_documents), we execute it locally from the provided context, store the result in a short session, and issue a second provider call using that result to get the next actionable tool.
+  - Multi-turn Plan/Act: executes context tools locally (get_active_script, list_selection, list_open_documents), feeds results back into the conversation, and continues up to `VECTOR_MAX_TURNS` (default 4) until an actionable tool is emitted.
   - Provider adapters present: openrouter.ts (call path), openai.ts (stub).
 - Plugin (Vector)
   - Dock UI with input + Send. Sends context (active script + selection) to /api/chat and renders proposals.

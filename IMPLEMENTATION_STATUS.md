@@ -8,11 +8,17 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 - Orchestrator: Provider-agnostic tool-call parsing → proposals in `warp/apps/web/lib/orchestrator`.
 - Plugin (Roblox Studio): Chat UI, diff previews, apply basic edits/rename, and asset insertion in `warp/plugin`.
 - Docs: System prompt, tools, flows in `Warp.md` and `cline_openai.md`.
+- Docs: Multi‑turn orchestration spec in `multi-orchistration.md`.
 
 ## Implemented
 
 - Orchestrator core
   - `runLLM()` maps tool-calls to proposals; adds fallback behaviors.
+    - `warp/apps/web/lib/orchestrator/index.ts:1`
+  - Multi-turn Plan/Act loop with context tools (`get_active_script`, `list_selection`, `list_open_documents`).
+    - Executes context tools locally, feeds JSON results back to the provider, and continues until an action tool is emitted or max turns is reached.
+    - Config: `VECTOR_MAX_TURNS` (default 4). Context tool result for `activeScript.text` is truncated to 40k chars for safety.
+    - System prompt updated to include context tools and rules.
     - `warp/apps/web/lib/orchestrator/index.ts:1`
   - Tool schemas (Zod): strict validation for all advertised tools.
     - `warp/apps/web/lib/tools/schemas.ts:1`
@@ -62,11 +68,6 @@ This document tracks what’s implemented, partial (placeholder or limited), and
       - `warp/plugin/src/tools/generate_asset_3d.lua:1`
 
 ## Partially Implemented (placeholders or limited)
-
-- Plan/Act execution loop (orchestrator)
-  - Only a single “context tool → follow-up” call is scaffolded via `VECTOR_PLAN_ACT=1`.
-  - Multi-turn tool orchestration, retries, and guardrails not yet implemented.
-  - `warp/apps/web/lib/orchestrator/index.ts:200`
 
 - list_open_documents (plugin)
   - Placeholder returns only ActiveScript; Roblox APIs don’t expose full tab enumeration in a simple way.
@@ -123,7 +124,8 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 - Provider credentials/decisions
   - OpenRouter-compatible provider: Base URL, API Key, Model ID. Either pass via plugin Settings (preferred) or `.env.local`:
     - `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (optional), `VECTOR_USE_OPENROUTER=1` to enable provider path.
-  - Decide default model(s) and whether to enable `VECTOR_PLAN_ACT=1`.
+  - Decide default model(s).
+  - Optional: set `VECTOR_MAX_TURNS` (default 4) to control multi-turn depth.
 
 - Catalog provider
   - Provide `CATALOG_API_URL` that returns normalized `{ results: [{ id, name, creator, type, thumbnailUrl? }] }`.
@@ -153,7 +155,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - Web
   - `cd warp/apps/web && npm install && npm run dev` (or `npm run build && npm start`).
-  - Optional `.env.local`: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `VECTOR_USE_OPENROUTER=1`, `VECTOR_PLAN_ACT=0|1`, `CATALOG_API_URL`.
+  - Optional `.env.local`: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `VECTOR_USE_OPENROUTER=1`, `VECTOR_MAX_TURNS=4`, `CATALOG_API_URL`.
   - Data directory: proposals persisted at `warp/apps/web/data/proposals.json` (auto-created).
   - `.gitignore` excludes env files under `warp/apps/web` and the local `data/` folder.
 
