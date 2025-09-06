@@ -927,3 +927,261 @@ Working now
   - The plugin sends `provider` in the `/api/chat` body: `{ name:'openrouter', baseUrl, apiKey, model }`.
   - The server uses these values for the provider call and does not persist them (only proposals are stored).
   - `.gitignore` excludes env files under `warp/apps/web` and the local `data/` folder.
+
+
+---
+
+# 14) Desired AI Workflow (Sequential, Cline‑style)
+
+This is the **final, intended behavior** after all phases are implemented. The loop is **single‑threaded and sequential**: one provider call at a time, one tool per message, one approval per write.
+
+## 14.1 High‑level loop (one step at a time)
+
+1. **Kickoff** — Create a new **Workflow** record with `status=planning` when the user asks for a task (e.g., “make a 10×10 farming plot”).  
+2. **Plan Next Tiny Step** — Orchestrator calls the LLM **once** and asks for *one* atomic tool action (not many). Inputs include: user goal, **Workflow ledger** (steps/results so far), **Working Set** (facts & fingerprints), and available caches.  
+3. **Proposal** — Backend returns a **proposal**: `edit`, `object_op`, or `asset_op`, each minimal and undoable.  
+4. **Approval Gate** — Plugin renders a diff/op card and waits for **Approve**. No writes without explicit approval.  
+5. **Execute Safely** — Plugin runs the **single tool** wrapped in `ChangeHistoryService` to ensure **one undo step**. For script edits, verify `beforeHash` to avoid stale diffs.  
+6. **Acknowledge & Log** — Plugin posts `/api/proposals/:id/apply` with success/error, touched paths, and new **fingerprints** (e.g., afterHash).  
+7. **Update Memory** — Backend appends a **Step** to the Workflow ledger, updates caches keyed by fingerprints, emits a streaming status (“Step 3/20 applied: Created Workspace/FarmBase”).  
+8. **Loop** — Orchestrator calls the LLM again with the **updated Working Set** and asks for the next atomic step. Repeat until `status=completed` or the user pauses.
+
+**Invariants**  
+- One provider call in flight.  
+- One tool per LLM message.  
+- One approval = one undo step.  
+- Every write is auditable and reversible.
+
+## 14.2 What goes into the LLM prompt each turn (Working Set)
+
+Provide **constraints + proofs**, not dumps of the entire place:
+
+- **Goal recap** (≤2 sentences).  
+- **Recent steps** (last 3–6): short lines like “(✓) create_instance Part → `Workspace/FarmBase` (v=12)”.  
+- **Known world facts** (<30 items): key paths, existence, hashes/versions. Example:  
+  - `ReplicatedStorage/CropSystem` exists (hash `91f…`), last edited at Step 7.  
+  - `Workspace/FarmBase` exists (version `v12`), size `[80,1,80]`.  
+- **Cache facts (with proofs)**: “File tree snapshot `S123` is current (placeHash `PH1`); no changes since.”  
+- **Outstanding subgoal**: “Create 10×10 soil tiles under `Workspace/FarmBase`.”  
+- **Rules**: “Use **one** tool per message. Do **not** re‑read unchanged resources; rely on the cache facts unless a fingerprint changed.”
+
+---
+
+# 15) Memory, Caching, and How We Avoid Re‑doing Work
+
+The next turn “knows what happened” because the backend maintains **two layers of memory** and exposes them to the model in a compact way.
+
+## 15.1 Workflow Ledger (authoritative memory)
+
+For each approved step, persist:
+
+- **Attempted action**: tool name + normalized args.  
+- **Result**: success/error, brief details.  
+- **Resources touched**: canonical paths.  
+- **Fingerprints**: e.g., script `beforeHash/afterHash`, instance `version` or key‑props hash.  
+- **New facts**: discoveries (“Found `ReplicatedStorage/CropSystem`”).
+
+This ledger powers audit, recovery, and resume.
+
+## 15.2 Tool‑Result Cache (don’t re‑read unchanged code)
+
+Cache **expensive** read‑only tool results against **fingerprints**:
+
+- **Key shape**: `toolName|argsNormalized|fingerprint(s)`  
+  - e.g., `list_children|Workspace|placeHash=PH1`  
+  - e.g., `get_active_script|path=ReplicatedStorage/CropSystem|hash=91f…`  
+- **On next turn**: If fingerprints match, serve the cached result and *tell the model you did*: “Used cached `list_children(Workspace)` from snapshot S123; unchanged.”  
+- **Invalidation**: If any dependent resource changes (new hash/version) or placeHash changes, invalidate related keys. Optional “stale‑while‑revalidate” with TTLs.
+
+**Where to store**: Start with **Postgres** (durable). Add **Redis/KV** later if you need lower latency or cross‑instance streaming.
+
+## 15.3 Resource fingerprints
+
+- **Scripts**: full‑text hash (the same `beforeHash/afterHash` used for edit safety).  
+- **Instances**: light hash or **version counter** of `{ClassName, Name, select properties}`.  
+- **Place snapshot (optional)**: `placeHash` that changes when any tracked resource changes (good broad invalidator).
+
+---
+
+# 16) Infra Choices — Do We Need Redis?
+
+You can ship without Redis. Use it later if scale demands it.
+
+## 16.1 Minimal production stack
+
+- **Postgres (must‑have)**: workflows, steps, proposals, audit, tool_cache.  
+- **Long‑poll streaming**: in‑memory per process is fine on a single instance.  
+- **Rate limiting**: simple per‑user counters in Postgres are OK to start.
+
+## 16.2 When to add Redis/KV (or Upstash/Vercel KV)
+
+Add when any of the following appear:
+
+- **Multiple backend instances** need shared long‑poll streams (pub/sub).  
+- **Distributed locks** so only one worker advances a workflow at a time.  
+- **Low‑latency caches** for read‑only tools or catalog results.  
+- **Strong rate limiting** and idempotency keys.  
+- **Background job queue** (3D generation, analysis).
+
+**Decision matrix**
+
+- Single instance, few users → **Postgres only**.  
+- Autoscale + live streaming → **add Redis** (channels: `workflow:{id}:stream`).  
+- Exactly‑once execution → **add Redis locking** (`SETNX` with TTL).  
+- Heavy catalog/search reuse → **Redis cache** with TTL + fallback to Postgres.  
+
+---
+
+# 17) Operational Guarantees & Guardrails
+
+- **Idempotency**: proposals carry unique `proposalId`; plugin ignores duplicate apply attempts.  
+- **De‑dupe**: orchestrator refuses to generate an identical proposal unless a relevant fingerprint changed.  
+- **Edit safety**: `beforeHash` mismatch blocks apply and asks for re‑preview.  
+- **Sequentiality**: at most one provider call in flight per workflow; at most one mutating tool executing in the plugin.  
+- **Summarization**: context compaction happens automatically when near token budget; only summaries and the last few turns are sent to the model.
+
+---
+
+# 18) Developer Checklists (quick reference)
+
+## 18.1 Cache keys & invalidation
+
+- [ ] Normalize args (paths canonicalized via `GetFullName()`).  
+- [ ] Include **exact** fingerprint fields that affect the result.  
+- [ ] Invalidate on: script `afterHash` change; instance `version` bump; `placeHash` change.  
+- [ ] TTL: 10–60 minutes for structure reads; shorter for code reads if editors are active.  
+- [ ] On cache hit: include a short “cache fact” line in the next Working Set.
+
+## 18.2 Prompt discipline per turn
+
+- [ ] State rules: *one tool per message; minimal diffs; do not re‑read unchanged*.  
+- [ ] Provide only **recent** steps + **cache facts** with fingerprints.  
+- [ ] Ask for the **smallest** next action and explicit acceptance criteria.  
+- [ ] If validation failed last turn, paste the exact error into the new system context.
+
+## 18.3 Data you must persist
+
+- [ ] Workflow (goal, status, timestamps).  
+- [ ] Steps (tool, args, result, resources touched, fingerprints).  
+- [ ] Proposals (rendered to user, pending/approved/rejected).  
+- [ ] Apply acks (success/failure + metadata).  
+- [ ] Tool cache entries (key, value, fingerprints, TTL).  
+- [ ] Audit events (who/when/what).
+
+---
+
+# 19) End‑to‑End Example (farming snippet)
+
+**User:** “Make me a farming game with a 10×10 plot and basic crop logic.”  
+**Loop:**
+
+1. **Plan** next step → **Proposal:** `create_instance(Part)` → `Workspace/FarmBase`.  
+2. **Approve → Apply** → Step logged with new path + version.  
+3. **Plan** next step → **Proposal:** generate soil grid (batched `create_instance` ops).  
+4. **Approve → Apply** → Paths + versions recorded; placeHash updated.  
+5. **Plan** next step → **Proposal:** `apply_edit` add `ReplicatedStorage/CropSystem` (ModuleScript). `beforeHash` recorded.  
+6. **Approve → Apply** → `afterHash` recorded; cache invalidation for script reads.  
+7. Repeat until inventory, save/load, and prompts are in place → **status=completed**.
+
+The model never re‑reads the file tree unless fingerprints changed; it relies on cache facts furnished in the Working Set each turn.
+
+
+
+---
+
+# 20) Appendix O — Conversation Memory Architecture (Cline parity)
+
+This appendix documents how Vector/Warp maintains **chat memory** and **conversation state** so the AI always knows what happened last, across long sessions and restarts. It mirrors Cline’s approach (dual histories, persistence, truncation, auto‑compact summarization, and a persistent Memory Bank).
+
+## O.1 Goals
+- Preserve **coherence** in a sequential, single‑threaded loop (one tool per message, one request at a time).
+- Survive **long tasks** by staying within the model’s context window via intelligent summarization.
+- Persist state across **restarts/updates** and support **resume**.
+- Give the LLM **proof‑level facts** (paths, hashes/versions) instead of repeating costly reads.
+
+## O.2 Two parallel histories (like Cline)
+We keep **two synchronized tracks** per workflow:
+
+1) **API Conversation History** — the exact raw messages sent to/received from the provider (system + user/assistant turns), suitable for re‑prompting.  
+2) **Vector Messages** — the enriched timeline shown in the UI (proposals, tool results, apply acks, summaries).
+
+**Per‑message metadata we persist:**  
+- `workflowId`, `ulid/id`, `ts`  
+- `role` (`system|user|assistant|tool|summary`) and `content` (or `delta` for streams)  
+- `proposalId|stepId` link (if applicable)  
+- **Cost & size metrics** for the last API request: `tokensIn`, `tokensOut`, `cacheWrites`, `cacheReads`, `totalCost`  
+- `conversationHistoryIndex` → index pointing to the corresponding API message at the time the enriched message was created (Cline‑style)  
+- `conversationHistoryDeletedRange` → the window slice removed so we can reconstruct context state even after truncation
+
+> **Why two tracks?** We need (a) exact provider history for reproducibility and (b) richer, user‑facing events for the UI and audit. They drift by design but stay cross‑linked via indices.
+
+## O.3 Persistence layout (production)
+Use Postgres tables (names illustrative):
+- `api_messages(id, workflowId, idx, role, content, tokensIn, tokensOut, cacheWrites, cacheReads, createdAt)`
+- `vector_messages(id, workflowId, ulid, ts, role, content, proposalId, stepId, conversationHistoryIndex, conversationHistoryDeletedRange, costJson)`
+- `workflows`, `workflow_steps`, `proposals`, `audit` (already defined earlier)
+- Optional: `summaries(id, workflowId, coversFromIdx, coversToIdx, tokens, text)` for summarized blocks
+
+**Atomicity:** write the vector message and update the API history pointer in the same transaction when possible.
+
+## O.4 Context Window Management (ContextManager analogue)
+Before each provider call we compute an **updated prompt bundle**:
+- Keep: system prompt, tools list, **last N user/assistant turns (e.g., 6)**, last **K tool results (e.g., 3)**.  
+- If close to budget (use the previous call’s `tokensIn+tokensOut+cache*` as a heuristic or model‑specific limit):  
+  1. Run **context optimizations** (drop redundant “thinking” text, collapse verbose tool echoes).  
+  2. If still large, perform a **Summarization step** that produces a **Summary Block** covering an older span of conversation.  
+  3. Record/update `conversationHistoryDeletedRange` to reflect which indices were replaced by the summary.
+
+**Summary Block expectations:** 800–1200 tokens; include (a) user goal, (b) accepted proposals, (c) tool results and fingerprints (paths + hashes/versions), (d) open blockers/next targets. Emit as a `role: "summary"` message and store in `summaries` and `vector_messages`.
+
+## O.5 Auto‑Compact Memory System (Cline parity)
+- Triggered when crossing a percentage of the model’s window or when switching to a smaller‑context model.  
+- Produces a **comprehensive, technical summary** that replaces older verbatim history and **preserves crucial facts** (file paths, diffs applied, asset IDs, hashes, decisions).  
+- The UI shows a “Context summarized” event; costs counted like any other provider call.
+
+## O.6 Memory Bank (persistent project knowledge)
+A durable, human‑readable knowledge file (or DB row) that outlives any one conversation. Suggested file: `apps/web/data/memory/<projectId>/MemoryBank.md` (or a `memory_bank` table). Sections:
+
+- **Project Charter**: scope, success criteria, constraints.  
+- **Conventions**: naming, style, directory layout (e.g., where ModuleScripts live).  
+- **Key Entities & Paths**: canonical `GetFullName()` paths for important instances/scripts.  
+- **Decisions**: ADR‑style bullets (“We use ProximityPrompt over Touched for X”).  
+- **Focus/TODO Chain**: the persistent task list for long‑horizon work.
+
+**Synchronization rules:**  
+- After each **Summarization** or when a **Decision** is logged, update the Memory Bank.  
+- The **Working Set** sent to the model includes a **short extract** of Memory Bank items relevant to the current subtask.
+
+## O.7 Tool‑Result Cache (no re‑reading unchanged code)
+- Cache key: `toolName|normalizedArgs|fingerprints`. Examples:  
+  - `list_children|Workspace|placeHash=PH1`  
+  - `get_properties|Workspace/FarmBase|version=v12`  
+  - `get_active_script|ReplicatedStorage/CropSystem|hash=91f…`
+- On cache hit: don’t call the plugin; embed a **cache fact** in the Working Set (“Using cached result from S123; unchanged since PH1”).  
+- Invalidation: bump or delete entries when any dependent fingerprint changes (script `afterHash`, instance `version`, or `placeHash`). TTL recommended (10–60 min).  
+- Storage: Postgres to start; add Redis/KV when scaling or multi‑instance streaming is required.
+
+## O.8 Resume & Recovery
+On restart or user “Resume,” reconstruct state by:
+1. Loading the **Workflow** and last **Step** statuses.  
+2. Restoring **API Conversation History** up to the last request (including any Summary Blocks).  
+3. Recreating the **Working Set**: last N turns + cache facts + Memory Bank extract.  
+4. Continuing the loop from the next **pending/approved** step or planning a new step if none pending.
+
+## O.9 Guardrails & invariants (enforced every turn)
+- **Sequentiality**: at most one provider call in flight per workflow; no parallel tool execution.  
+- **One tool per message**: reject multi‑tool emissions; instruct the model to retry with a single tool.  
+- **Idempotency**: proposal IDs are unique; duplicate applies are ignored in the plugin.  
+- **Edit safety**: `beforeHash` mismatch blocks apply and prompts **Re‑preview**.  
+- **De‑duplication**: skip generating an identical proposal unless a relevant fingerprint changed.
+
+## O.10 What the model sees (the Working Set contract)
+Each provider call includes:
+- **Goal recap** + **Current subgoal**.  
+- **Recent steps** (3–6) in ultra‑compact lines.  
+- **Known world facts** (paths + hashes/versions).  
+- **Cache facts** (which reads are already fresh).  
+- **Rules** (single tool, minimal diffs, no redundant reads).  
+- **Ask**: “Propose the **next single tool** to advance the subgoal.”
+
+**Result:** The model doesn’t waste calls re‑reading the codebase and always “knows what it did last,” because the orchestrator supplies a verifiable memory of actions and state.
