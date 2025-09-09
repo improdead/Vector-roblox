@@ -5,6 +5,7 @@ export type StoredEvent = { type: string; at: number; data?: any }
 export type StoredProposal = {
   id: string
   projectId: string
+  workflowId?: string
   message: string
   createdAt: number
   status: 'pending' | 'applied'
@@ -30,6 +31,7 @@ load()
 
 export function saveProposals(input: {
   projectId: string
+  workflowId?: string
   message: string
   proposals: any[]
 }): StoredProposal[] {
@@ -39,6 +41,7 @@ export function saveProposals(input: {
     const rec: StoredProposal = {
       id: String(p.id),
       projectId: input.projectId,
+      workflowId: input.workflowId,
       message: input.message,
       createdAt: now,
       status: 'pending',
@@ -70,4 +73,3 @@ export function getProposal(id: string): StoredProposal | undefined {
 export function listProposals(): StoredProposal[] {
   return Array.from(map.values()).sort((a, b) => b.createdAt - a.createdAt)
 }
-

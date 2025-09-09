@@ -20,21 +20,38 @@ const ChatSchema = z.object({
     openDocs: z.array(z.object({ path: z.string() })).optional(),
   }),
   provider: ProviderSchema,
+  workflowId: z.string().optional(),
+  approvedStepId: z.number().optional(),
 })
 
 export async function POST(req: Request) {
   try {
     const input = ChatSchema.parse(await req.json())
-    const proposals = await runLLM(input)
+    // Optionally bootstrap a workflow
+    const { createWorkflow, getWorkflow, appendStep } = await import('../../../lib/store/workflows')
+    const { pushChunk } = await import('../../../lib/store/stream')
+
+    let workflowId = input.workflowId
+    if (!workflowId) {
+      const wf = createWorkflow({ projectId: input.projectId, context: { approvedStepId: input.approvedStepId } })
+      workflowId = wf.id
+      pushChunk(workflowId, 'planning: started')
+    }
+
+    const proposals = await runLLM(input as any)
 
     // Persist proposals for auditing and later apply acknowledgement
     try {
-      saveProposals({ projectId: input.projectId, message: input.message, proposals })
+      const stored = saveProposals({ projectId: input.projectId, workflowId, message: input.message, proposals })
+      // Add steps to workflow for each proposal
+      for (const p of stored) {
+        appendStep(workflowId!, { id: p.id, proposalId: p.id, status: 'pending' })
+      }
     } catch (e) {
       console.warn('failed to persist proposals (non-fatal)', e)
     }
 
-    return Response.json({ proposals })
+    return Response.json({ workflowId, proposals, isComplete: false })
   } catch (err: any) {
     const msg = err?.message || 'Unknown error'
     const status = /invalid/i.test(msg) ? 400 : 500

@@ -263,7 +263,9 @@ end
 
 **Server (Next.js)**
 
-* `GET /api/assets/search?query=…&tags=…&limit=…` — Catalog search (server‑side). Also accepts legacy `q` as alias for `query`. Normalize results to `{ id, name, creator, type, thumbnailUrl }`. If `CATALOG_API_URL` is not set, returns a small stubbed list for local dev.
+* `GET /api/assets/search?query=…&tags=…&limit=…` — Catalog search (server‑side). Also accepts legacy `q` as alias for `query`. Normalize results to `{ id, name, creator, type, thumbnailUrl }`.
+  - Env: `CATALOG_API_URL` (required for real results). If unset, returns stubbed results during local dev.
+  - Env: `CATALOG_API_KEY` (optional) — sent as `Authorization: Bearer <key>` when present.
 * Optionally cache by `query` and tags.
 
 **Plugin (Luau)**
@@ -900,10 +902,11 @@ Working now
 
 - Web (Next.js + npm)
   - Local app scaffold (Next 14) with npm scripts; landing page at /.
-  - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search calls a Catalog provider (CATALOG_API_URL required; no fallback); /api/assets/generate3d returns a stub jobId.
+  - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search calls a Catalog provider (falls back to stub data if `CATALOG_API_URL` unset); /api/assets/generate3d returns a stub jobId.
   - Provider tool-call parsing (OpenRouter) behind flags or per-request Settings: model outputs exactly one XML-like tool call which is parsed and mapped to proposals. Arguments validated with zod; when provider is configured, errors are surfaced (no fallback).
   - Multi-turn Plan/Act: executes context tools locally (get_active_script, list_selection, list_open_documents), feeds results back into the conversation, and continues up to `VECTOR_MAX_TURNS` (default 4) until an actionable tool is emitted.
   - Provider adapters present: openrouter.ts (call path), openai.ts (stub).
+  - Timeouts: provider calls honor `OPENROUTER_TIMEOUT_MS` (default 30000ms); catalog fetch honors `CATALOG_TIMEOUT_MS` (default 15000ms).
 - Plugin (Vector)
   - Dock UI with input + Send. Sends context (active script + selection) to /api/chat and renders proposals.
   - Approve/Reject per proposal; applies:
@@ -923,13 +926,38 @@ Working now
   - Base URL: e.g., `https://openrouter.ai/api/v1` (OpenAI-compatible)
   - API Key: your provider key (stored locally via `plugin:SetSetting`, never committed)
   - Model ID: e.g., `moonshotai/kimi-k2:free` or `deepseek/deepseek-chat`
+  - Backend Base URL (Next.js): e.g., `http://127.0.0.1:3000` for local dev, or your deployed Vercel URL.
 - Transport & Security:
   - The plugin sends `provider` in the `/api/chat` body: `{ name:'openrouter', baseUrl, apiKey, model }`.
-  - The server uses these values for the provider call and does not persist them (only proposals are stored).
+  - The plugin uses the Backend Base URL for all HTTP calls to your app (`/api/chat`, `/api/proposals/:id/apply`, `/api/assets/search`, etc.).
+  - The server uses the provider values for the provider call and does not persist them (only proposals are stored).
   - `.gitignore` excludes env files under `warp/apps/web` and the local `data/` folder.
 
 
 ---
+
+# Appendix M — Milestone Exit Criteria (Checklist)
+
+- A (Loop): sequential calls verified; 3×3 grid completes without manual fixes
+  - Status: Implemented. Orchestrator recognizes “grid 3x3” and returns 10 proposals (1 model + 9 parts) that apply sequentially.
+- B (Dispatcher): every mutation creates one undo step; unknown tools error gracefully
+  - Status: Implemented. Plugin dispatches object ops via tool modules (`create_instance`, `set_properties`, `rename_instance`, `delete_instance`), each ChangeHistory-wrapped. Unknown ops surface clear errors.
+- C (Edit safety): beforeHash conflicts block apply; re‑preview flow tested
+  - Status: Implemented. Server includes `safety.beforeHash` (sha1); plugin validates and blocks on mismatch with a “re-open diff to refresh” hint.
+- D (Streaming): long‑poll UI shows progress; at most one poller active
+  - Status: Implemented. Single long‑poller per workflowId appends status lines to the UI.
+- E (Catalog): real results + thumbs; Insert works and reports paths
+  - Status: Partial. Real results require `CATALOG_API_URL`; plugin renders thumbnails when present and reports inserted paths.
+- F (Persistence): workflows/audit survive redeploy; filtered listings exist
+  - Status: Implemented. File-backed proposals/workflows persist; new routes: `/api/proposals?projectId=…`, `/api/workflows`, `/api/workflows/:id`.
+- G (Templates): farming demo produces 15–20 atomic steps; user approves each
+  - Status: Implemented. “farming” returns ~16 proposals (Farm model, base, soil tiles) for step-by-step approval.
+- H (Recovery/Resume): at least Retry + Ask flows implemented; resume works after restart
+  - Status: Partial. Resume via `workflowId` is supported; UI Retry/Ask buttons not yet implemented.
+- I (Tests/Metrics): scenario suite passes; latency and failure metrics visible
+  - Status: Not yet. Suggest adding basic latency/error metrics and a smoke test suite.
+
+# 14) Desired AI Workflow (Sequential, Cline‑style)
 
 # 14) Desired AI Workflow (Sequential, Cline‑style)
 

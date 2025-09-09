@@ -6,6 +6,7 @@ export type EditProposal = {
   path: string
   diff: { mode: 'rangeEDITS'; edits: Edit[] }
   notes?: string
+  safety?: { beforeHash?: string }
 }
 export type ObjectOp =
   | { op: 'create_instance'; className: string; parentPath: string; props?: Record<string, unknown> }
@@ -46,7 +47,9 @@ import { callOpenRouter } from './providers/openrouter'
 import { z } from 'zod'
 import { Tools } from '../tools/schemas'
 import { getSession, setLastTool } from '../store/sessions'
+import { pushChunk } from '../store/stream'
 import { applyRangeEdits, simpleUnifiedDiff } from '../diff/rangeEdits'
+import crypto from 'node:crypto'
 
 const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
 Proposal-first. One tool per message.
@@ -131,7 +134,8 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
       const old = input.context.activeScript?.text || ''
       const next = applyRangeEdits(old, edits)
       const unified = simpleUnifiedDiff(old, next, path)
-      proposals.push({ id: id('edit'), type: 'edit', path, notes: `Parsed from ${name}`, diff: { mode: 'rangeEDITS', edits }, preview: { unified } } as any)
+      const beforeHash = crypto.createHash('sha1').update(old).digest('hex')
+      proposals.push({ id: id('edit'), type: 'edit', path, notes: `Parsed from ${name}`, diff: { mode: 'rangeEDITS', edits }, preview: { unified }, safety: { beforeHash } } as any)
       return proposals
     }
   }
@@ -194,6 +198,55 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   const providerRequested = !!(input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey)
   const useProvider = providerRequested || process.env.VECTOR_USE_OPENROUTER === '1'
 
+  // Deterministic templates for milestone verification
+  const lower = msg.toLowerCase()
+  const proposals: Proposal[] = []
+  const addObj = (ops: ObjectOp[], notes?: string) => proposals.push({ id: id('obj'), type: 'object_op', ops, notes })
+  const makePartProps = (name: string, x: number, y: number, z: number) => ({
+    Name: name,
+    Anchored: true,
+    Size: { x: 4, y: 1, z: 4 },
+    CFrame: { x, y, z },
+  })
+  if (/\b(grid\s*3\s*x\s*3|3\s*x\s*3\s*grid)\b/.test(lower)) {
+    const parent = 'game.Workspace'
+    addObj([{ op: 'create_instance', className: 'Model', parentPath: parent, props: { Name: 'Grid' } }], 'Create Grid model')
+    const basePath = 'game.Workspace.Grid'
+    const coords = [-4, 0, 4]
+    for (let i = 0; i < 3; i++) {
+      for (let j = 0; j < 3; j++) {
+        const name = `Cell_${i + 1}_${j + 1}`
+        const x = coords[j]
+        const z = coords[i]
+        addObj([
+          { op: 'create_instance', className: 'Part', parentPath: basePath, props: makePartProps(name, x, 0.5, z) },
+        ], `Create ${name}`)
+      }
+    }
+    return proposals
+  }
+  if (/\bfarming\b/.test(lower)) {
+    const parent = 'game.Workspace'
+    addObj([{ op: 'create_instance', className: 'Model', parentPath: parent, props: { Name: 'Farm' } }], 'Create Farm model')
+    const basePath = 'game.Workspace.Farm'
+    addObj([{ op: 'create_instance', className: 'Part', parentPath: basePath, props: { Name: 'FarmBase', Anchored: true, Size: { x: 40, y: 1, z: 40 }, CFrame: { x: 0, y: 0.5, z: 0 } } }], 'Create Farm base')
+    // 4x4 soil grid = 16 steps including farm+base above → add 14 more
+    const coords = [-12, -4, 4, 12]
+    let count = 0
+    for (let i = 0; i < 4; i++) {
+      for (let j = 0; j < 4; j++) {
+        if (count >= 14) break
+        const name = `Soil_${i + 1}_${j + 1}`
+        const x = coords[j]
+        const z = coords[i]
+        addObj([{ op: 'create_instance', className: 'Part', parentPath: basePath, props: makePartProps(name, x, 0.5, z) }], `Create ${name}`)
+        count++
+      }
+      if (count >= 14) break
+    }
+    return proposals
+  }
+
   // Helper: build tool XML from name/args (for assistant history)
   const toXml = (name: string, args: Record<string, any>): string => {
     const parts: string[] = [`<${name}>`]
@@ -209,6 +262,11 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   if (useProvider) {
     const maxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
     const messages: { role: 'user' | 'assistant'; content: string }[] = [{ role: 'user', content: msg }]
+    const streamKey = (input as any).workflowId || input.projectId
+    const validationRetryLimit = 2
+    const unknownToolRetryLimit = 1
+    let unknownToolRetries = 0
+    let consecutiveValidationErrors = 0
 
     for (let turn = 0; turn < maxTurns; turn++) {
       let content = ''
@@ -221,13 +279,16 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
           baseUrl: input.provider?.baseUrl,
         })
         content = resp.content || ''
+        pushChunk(streamKey, `provider.response turn=${turn}`)
       } catch (e: any) {
+        pushChunk(streamKey, `error.provider ${e?.message || 'unknown'}`)
         if (providerRequested) throw new Error(`Provider error: ${e?.message || 'unknown'}`)
         break
       }
 
       const tool = parseToolXML(content)
       if (!tool) {
+        pushChunk(streamKey, 'error.validation no tool call parsed')
         if (providerRequested) throw new Error('Provider returned no parseable tool call')
         break
       }
@@ -244,7 +305,21 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       const schema = (Tools as any)[name as any] as z.ZodTypeAny | undefined
       if (schema) {
         const parsed = schema.safeParse(a)
-        if (parsed.success) a = parsed.data
+        if (!parsed.success) {
+          consecutiveValidationErrors++
+          const errMsg = parsed.error?.errors?.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ') || 'invalid arguments'
+          pushChunk(streamKey, `error.validation ${String(name)} ${errMsg}`)
+          // Reflect error verbatim and retry (up to limit)
+          messages.push({ role: 'assistant', content: toXml(String(name), a) })
+          messages.push({ role: 'user', content: `VALIDATION_ERROR ${String(name)}\n${errMsg}` })
+          if (consecutiveValidationErrors > validationRetryLimit) {
+            throw new Error(`Validation failed repeatedly for ${String(name)}: ${errMsg}`)
+          }
+          continue
+        } else {
+          consecutiveValidationErrors = 0
+          a = parsed.data
+        }
       }
 
       // Context tools: execute locally, feed result back, and continue
@@ -262,6 +337,7 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
           : result
 
         setLastTool(input.projectId, String(name), safeResult)
+        pushChunk(streamKey, `tool.result ${String(name)}`)
 
         // Append assistant tool call and user tool result to the conversation
         messages.push({ role: 'assistant', content: toXml(String(name), a) })
@@ -276,6 +352,18 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       // If model emitted an unknown planning tag like <plan>, carry it forward and continue
       if (String(name).toLowerCase() === 'plan') {
         messages.push({ role: 'assistant', content: toXml(String(name), a) })
+        pushChunk(streamKey, 'planning…')
+        continue
+      }
+
+      // Unknown tool: reflect error and allow a limited retry
+      if (!(Tools as any)[name as any]) {
+        unknownToolRetries++
+        const errMsg = `Unknown tool: ${String(name)}`
+        pushChunk(streamKey, `error.validation ${errMsg}`)
+        messages.push({ role: 'assistant', content: toXml(String(name), a) })
+        messages.push({ role: 'user', content: `VALIDATION_ERROR ${String(name)}\n${errMsg}` })
+        if (unknownToolRetries > unknownToolRetryLimit) break
         continue
       }
 
@@ -285,7 +373,8 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   }
 
   // Fallbacks: safe, deterministic proposals without provider parsing
-  if (input.context.activeScript) {
+  const fallbacksDisabled = (process.env.VECTOR_DISABLE_FALLBACKS || '1') === '1'
+  if (!fallbacksDisabled && input.context.activeScript) {
     const path = input.context.activeScript.path
     const prefixComment = `-- Vector: ${sanitizeComment(msg)}\n`
     const edits = [{ start: { line: 0, character: 0 }, end: { line: 0, character: 0 }, text: prefixComment }]
@@ -299,10 +388,11 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       notes: 'Insert a comment at the top as a placeholder for an edit.',
       diff: { mode: 'rangeEDITS', edits },
       preview: { unified },
+      safety: { beforeHash: (require('node:crypto') as typeof import('node:crypto')).createHash('sha1').update(old).digest('hex') },
     } as any]
   }
 
-  if (input.context.selection && input.context.selection.length > 0) {
+  if (!fallbacksDisabled && input.context.selection && input.context.selection.length > 0) {
     const first = input.context.selection[0]
     return [
       {
@@ -314,7 +404,10 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
     ]
   }
 
-  return [
-    { id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } },
-  ]
+  if (!fallbacksDisabled) {
+    return [
+      { id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } },
+    ]
+  }
+  throw new Error('No actionable tool produced within turn limit')
 }

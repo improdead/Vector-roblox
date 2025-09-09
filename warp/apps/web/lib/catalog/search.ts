@@ -14,7 +14,13 @@ export async function searchRobloxCatalog(query: string, limit: number): Promise
       thumbnailUrl: undefined,
     }))
   }
-  const res = await fetch(`${url}?query=${encodeURIComponent(query)}&limit=${limit}`)
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.CATALOG_TIMEOUT_MS || 15000))
+  const headers: Record<string, string> = {}
+  const apiKey = process.env.CATALOG_API_KEY
+  if (apiKey) headers['Authorization'] = `Bearer ${apiKey}`
+  const res = await fetch(`${url}?query=${encodeURIComponent(query)}&limit=${limit}`, { signal: controller.signal, headers })
+  clearTimeout(timeout)
   if (!res.ok) {
     const text = await res.text().catch(() => '')
     throw new Error(`Catalog provider error ${res.status}: ${text}`)

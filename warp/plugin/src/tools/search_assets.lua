@@ -1,10 +1,20 @@
 local Http = require(script.Parent.Parent.net.http)
 local HttpService = game:GetService("HttpService")
 
+local function getBackendBaseUrl()
+    local val = plugin and plugin:GetSetting and plugin:GetSetting("vector_backend_base_url")
+    if typeof(val) == "string" and #val > 0 then
+        return (string.sub(val, -1) == "/") and string.sub(val, 1, -2) or val
+    end
+    return "http://127.0.0.1:3000"
+end
+
 -- Calls backend asset search and returns results array
 return function(query, limit)
+    local base = getBackendBaseUrl()
     local url = string.format(
-        "http://127.0.0.1:3000/api/assets/search?query=%s&limit=%d",
+        "%s/api/assets/search?query=%s&limit=%d",
+        base,
         HttpService:UrlEncode(query or ""),
         tonumber(limit) or 8
     )
@@ -18,4 +28,3 @@ return function(query, limit)
     end
     return { ok = true, results = js.results or {} }
 end
-

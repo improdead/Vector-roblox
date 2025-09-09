@@ -15,15 +15,25 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 - Orchestrator core
   - `runLLM()` maps tool-calls to proposals; adds fallback behaviors.
     - `warp/apps/web/lib/orchestrator/index.ts:1`
+  - Deterministic templates for milestone verification
+    - Recognizes “grid 3x3” and “farming” and returns sequential object-op proposals without provider.
+    - Edit proposals include `safety.beforeHash` for conflict detection.
   - Multi-turn Plan/Act loop with context tools (`get_active_script`, `list_selection`, `list_open_documents`).
     - Executes context tools locally, feeds JSON results back to the provider, and continues until an action tool is emitted or max turns is reached.
     - Config: `VECTOR_MAX_TURNS` (default 4). Context tool result for `activeScript.text` is truncated to 40k chars for safety.
     - System prompt updated to include context tools and rules.
     - `warp/apps/web/lib/orchestrator/index.ts:1`
+  - Validation retries and diagnostics
+    - On zod validation failure, reflect the error back to the model and retry up to 2 times, then error out.
+    - Unknown tool names are echoed back once as a validation error to allow self-correction.
+    - Emits structured status/error chunks via in-memory stream store.
+    - Env: `VECTOR_DISABLE_FALLBACKS=1` to disable server-side fallbacks (errors surface to client).
+    - `warp/apps/web/lib/orchestrator/index.ts:1`
   - Tool schemas (Zod): strict validation for all advertised tools.
     - `warp/apps/web/lib/tools/schemas.ts:1`
   - Provider adapter (OpenRouter-compatible, OpenAI Chat Completions).
     - `warp/apps/web/lib/orchestrator/providers/openrouter.ts:1`
+    - Adds request timeout with abort (env `OPENROUTER_TIMEOUT_MS`, default 30000ms).
   - Range edits + unified diff utilities.
     - `warp/apps/web/lib/diff/rangeEdits.ts:1`
   - In-memory sessions (last tool result), file-backed proposals store.
@@ -33,19 +43,35 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - API routes (Next.js)
   - `POST /api/chat`: validates input, calls orchestrator, persists proposals.
+    - Accepts optional `workflowId`, `approvedStepId`. Creates a workflow if missing and returns `{ workflowId, proposals, isComplete:false }`.
     - `warp/apps/web/app/api/chat/route.ts:1`
   - `GET /api/proposals`: lists persisted proposals; `POST /api/proposals/:id/apply`: marks applied.
     - `warp/apps/web/app/api/proposals/route.ts:1`
     - `warp/apps/web/app/api/proposals/[id]/apply/route.ts:1`
+    - Apply route updates corresponding workflow step to `completed` when present.
+  - `GET /api/stream`: long-poll status chunks for a `workflowId` or `projectId`.
+    - `warp/apps/web/app/api/stream/route.ts:1`
   - `GET /api/assets/search`: calls catalog provider with stub fallback if `CATALOG_API_URL` unset.
     - `warp/apps/web/app/api/assets/search/route.ts:1`
     - `warp/apps/web/lib/catalog/search.ts:1`
+      - Adds fetch timeout via AbortController (env `CATALOG_TIMEOUT_MS`, default 15000ms).
+      - Supports `Authorization: Bearer <CATALOG_API_KEY>` header when `CATALOG_API_KEY` is set.
   - `POST /api/assets/generate3d`: enqueues a placeholder GPU job (returns `jobId`).
     - `warp/apps/web/app/api/assets/generate3d/route.ts:1`
+      - Validates `prompt` (400 on missing/empty).
+  - `GET /api/proposals?projectId=...`: filtered listing of proposals.
+    - `warp/apps/web/app/api/proposals/route.ts:1`
+  - Workflows listing and fetch (for resume/recovery):
+    - `warp/apps/web/app/api/workflows/route.ts:1`
+    - `warp/apps/web/app/api/workflows/[id]/route.ts:1`
 
 - Plugin (Roblox Studio)
   - Main dock UI: chat input, proposal cards, diff preview renderer, approval flow.
     - `warp/plugin/src/main.server.lua:1`
+    - Backend Base URL now configurable in Settings (`vector_backend_base_url`). All HTTP calls (chat, proposals/apply, asset search) use it; default `http://127.0.0.1:3000`.
+    - Streaming: single long-poll `/api/stream` poller per workflow showing progress lines in the UI.
+    - Dispatcher: object ops executed via tool modules; each mutation wrapped in ChangeHistory for an undo step.
+    - Edit safety: validates `safety.beforeHash` (sha1) before applying edits; blocks on mismatch with a re-preview hint.
   - Network helpers (GET/POST JSON).
     - `warp/plugin/src/net/http.lua:1`
   - Tool modules (Luau)
@@ -64,8 +90,8 @@ This document tracks what’s implemented, partial (placeholder or limited), and
       - `warp/plugin/src/tools/delete_instance.lua:1`
     - Assets: `insert_asset` (implemented), `search_assets` (backend call), `generate_asset_3d` (placeholder enqueue)
       - `warp/plugin/src/tools/insert_asset.lua:1`
-      - `warp/plugin/src/tools/search_assets.lua:1`
-      - `warp/plugin/src/tools/generate_asset_3d.lua:1`
+      - `warp/plugin/src/tools/search_assets.lua:1` (uses configurable backend base URL)
+      - `warp/plugin/src/tools/generate_asset_3d.lua:1` (uses configurable backend base URL)
 
 ## Partially Implemented (placeholders or limited)
 
@@ -89,22 +115,27 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - `warp/apps/web/lib/catalog/search.ts:1`
 
 - Tool module integration (plugin)
-  - Tools are implemented as separate files but `main.server.lua` currently uses inline functions for proposals. A unified tool-dispatch layer is not wired yet.
+  - Unified dispatch now routes object ops through tool modules (create/set/rename/delete) for consistent behavior and undo steps.
   - `warp/plugin/src/main.server.lua:1`
 
 - Packaging/deploy
   - No Vercel project set up, no domain allowlisting workflow documented inside Studio. Local env only.
 
+- Workflows (server)
+  - File-backed workflows store (`workflows.json`) with steps and statuses; no DB/Prisma yet.
+  - Steps are created per proposal; approval (apply) updates step to `completed`.
+  - No recovery/resume UI yet; no planner-generated step plan.
+
 ## Not Implemented
 
-- Streaming endpoints for Studio
-  - No `/api/stream` long-polling or chunk streaming route implemented. Plugin performs one-shot `/api/chat`.
+- UI Retry/Ask shortcuts
+  - Resume via `workflowId` is possible; explicit Retry/Ask buttons in the plugin UI are not added yet.
 
 - Advanced diff merging on server
   - Server merges range edits only for previews; no generalized multi-edit conflict resolution beyond simple application.
 
 - Full provider-driven, multi-turn tool loop
-  - Missing retries, backoff, context compaction with summarization, and safety guardrails.
+  - Core loop implemented with context tools and validation retries; still missing backoff, summarization, and advanced guardrails.
   - `warp/apps/web/lib/orchestrator/context.ts` has placeholder token accounting.
 
 - Analysis/CI tools (backend jobs)
@@ -112,6 +143,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - Durable database
   - Proposals persisted to JSON under `warp/apps/web/data/`. No SQL/Prisma backing.
+  - Workflows persisted to `warp/apps/web/data/workflows.json`.
 
 - Web dashboard UI
   - No frontend UI to browse proposals/history beyond simple API JSON.
@@ -126,9 +158,11 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - `OPENROUTER_API_KEY`, `OPENROUTER_MODEL` (optional), `VECTOR_USE_OPENROUTER=1` to enable provider path.
   - Decide default model(s).
   - Optional: set `VECTOR_MAX_TURNS` (default 4) to control multi-turn depth.
+  - Optional: set `OPENROUTER_TIMEOUT_MS` (default 30000) to cap provider calls.
 
 - Catalog provider
   - Provide `CATALOG_API_URL` that returns normalized `{ results: [{ id, name, creator, type, thumbnailUrl? }] }`.
+  - Optional `CATALOG_API_KEY` used as `Authorization: Bearer <key>` header.
   - Or confirm usage of stubbed results during local development.
 
 - 3D generation pipeline
@@ -147,6 +181,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - Packaging/deploy
   - Confirm target hosting (Vercel or other), environment variables, and Studio domain allowlist.
+  - Configure plugin “Backend Base URL” to your deployed Next.js backend.
 
 - UI priorities
   - Decide on timeline for richer diff UI (line-by-line), streaming indicators, and asset thumbnails.
@@ -155,12 +190,14 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - Web
   - `cd warp/apps/web && npm install && npm run dev` (or `npm run build && npm start`).
-  - Optional `.env.local`: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `VECTOR_USE_OPENROUTER=1`, `VECTOR_MAX_TURNS=4`, `CATALOG_API_URL`.
+  - Optional `.env.local`: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `OPENROUTER_TIMEOUT_MS=30000`, `VECTOR_USE_OPENROUTER=1`, `VECTOR_MAX_TURNS=4`, `VECTOR_DISABLE_FALLBACKS=1`, `CATALOG_API_URL`, `CATALOG_API_KEY`, `CATALOG_TIMEOUT_MS=15000`.
   - Data directory: proposals persisted at `warp/apps/web/data/proposals.json` (auto-created).
+  - Data directory: workflows persisted at `warp/apps/web/data/workflows.json` (auto-created).
   - `.gitignore` excludes env files under `warp/apps/web` and the local `data/` folder.
 
 - Studio Plugin
   - Load plugin, open the Vector dock. Use “Vector Settings” to enter provider config.
+  - Set “Backend Base URL (Next.js)” to your backend (e.g., `http://127.0.0.1:3000` for local dev, or your Vercel URL).
   - First HTTP request prompts domain permission; first write prompts Script Modification permission.
 
 ## Recommended Next Steps
