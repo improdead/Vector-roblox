@@ -27,11 +27,15 @@ export type ChatInput = {
   projectId: string
   message: string
   context: {
-    activeScript: { path: string; text: string } | null
+    // activeScript can be undefined when Studio has no open script; provider can gather context via tools
+    activeScript?: { path: string; text: string } | null
     selection?: { className: string; path: string }[]
     openDocs?: { path: string }[]
   }
   provider?: { name: 'openrouter'; apiKey: string; model?: string; baseUrl?: string }
+  mode?: 'ask' | 'agent'
+  maxTurns?: number
+  enableFallbacks?: boolean
 }
 
 function id(prefix = 'p'): string {
@@ -52,14 +56,96 @@ import { applyRangeEdits, simpleUnifiedDiff } from '../diff/rangeEdits'
 import crypto from 'node:crypto'
 
 const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
-Proposal-first. One tool per message.
-Output EXACTLY ONE tool call in an XML-like format and NOTHING ELSE:
+
+Core rules
+- One tool per turn: emit EXACTLY ONE tool tag and NOTHING ELSE. Wait for the tool result before the next step.
+- Proposal-first and undoable: never change code/Instances directly; always propose a small, safe step the plugin can preview/apply.
+- No prose, no markdown, no code fences, no extra tags. Do NOT invent fictitious tags like <plan> or <thoughts>.
+
+Tool call format (XML-like)
 <tool_name>\n  <param1>...</param1>\n  <param2>...</param2>\n</tool_name>
 
-Context tools (read-only): get_active_script(), list_selection(), list_open_documents().
-Action tools: show_diff(path,edits[]), apply_edit(path,edits[]), create_instance(className,parentPath,props), set_properties(path,props), rename_instance(path,newName), delete_instance(path), search_assets(query,tags?,limit?), insert_asset(assetId,parentPath?), generate_asset_3d(prompt,tags?,style?,budget?).
+Encoding for parameters
+- Strings/numbers: write the literal value.
+- Objects/arrays: INNER TEXT MUST be strict JSON (double quotes; no trailing commas). Never wrap JSON in quotes. Never add code fences.
+  ✅ <props>{"Name":"Grid","Anchored":true}</props>
+  ❌ <props>"{ \"Name\": \"Grid\" }"</props>
+  ❌ <props>```json{\n  \"Name\": \"Grid\"\n}```</props>
+  ❌ <props>{ Name: "Grid", }</props>
+- If a parameter is optional and unknown, omit the tag entirely (do NOT write "null" or "undefined").
 
-Rules: minimal diffs; use rangeEDITS {start:{line,character}, end:{line,character}, text}. Reference Instance paths via GetFullName(). Keep context requests minimal and only when needed.`
+Available tools
+- Context (read-only): get_active_script(), list_selection(), list_open_documents().
+- Actions: show_diff(path,edits[]), apply_edit(path,edits[]), create_instance(className,parentPath,props?), set_properties(path,props), rename_instance(path,newName), delete_instance(path), search_assets(query,tags?,limit?), insert_asset(assetId,parentPath?), generate_asset_3d(prompt,tags?,style?,budget?).
+
+Paths & names
+- Use canonical GetFullName() paths, e.g., game.Workspace.Model.Part.
+- Avoid creating names with dots or slashes; prefer alphanumerics + underscores (e.g., Cell_1_1).
+- If an existing path contains special characters, bracket segments: game.Workspace["My.Part"]["Wall [A]"]
+
+Roblox typed values (for props)
+- Scalars/booleans/strings: raw JSON.
+- Wrappers with "__t": Vector3 {"__t":"Vector3","x":0,"y":1,"z":0}; Vector2 {"__t":"Vector2","x":0,"y":0};
+  Color3 {"__t":"Color3","r":1,"g":0.5,"b":0.25}; UDim {"__t":"UDim","scale":0,"offset":16};
+  UDim2 {"__t":"UDim2","x":{"scale":0,"offset":0},"y":{"scale":0,"offset":0}};
+  CFrame {"__t":"CFrame","comps":[x,y,z, r00,r01,r02, r10,r11,r12, r20,r21,r22]};
+  EnumItem {"__t":"EnumItem","enum":"Enum.Material","name":"Plastic"};
+  BrickColor {"__t":"BrickColor","name":"Bright red"};
+  Instance ref {"__t":"Instance","path":"game.ReplicatedStorage.Folder.Template"}.
+- Attributes: prefix keys with @, e.g., {"@Health":100}.
+
+Editing rules
+- 0-based coordinates; end is exclusive. Prefer the smallest edit set; avoid whole-file rewrites.
+- Prefer show_diff first; use apply_edit only after approval. Never include __finalText.
+
+Context & defaults
+- If you need path/selection and it wasn't provided, call get_active_script / list_selection first.
+- If parentPath is unknown for create_instance/insert_asset, use game.Workspace.
+- Only set real properties for the target class; do not create instances via set_properties.
+
+Modes
+- Ask: do exactly one atomic change.
+- Agent: fetch minimal context if needed, then act with one tool.
+- Auto: assume approved small steps; avoid destructive ops; skip actions that require human choice.
+
+Assets & 3D
+- search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
+- insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
+- generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
+
+Validation & recovery
+- On VALIDATION_ERROR, resubmit the SAME tool once with corrected args; no commentary and no tool switching.
+
+Selection defaults
+- If EXACTLY ONE instance is selected and it is a reasonable container, prefer it by default:
+  - Use that selection as <parentPath> for create_instance/insert_asset when unspecified.
+  - Use that selection's path for rename_instance/set_properties/delete_instance when <path> is missing.
+  - If no single valid selection, default to game.Workspace or fetch context as needed.
+
+Properties vs Attributes
+- Only set real class properties in <props>. If a key is not a property of the target class, write it as an Attribute by prefixing with "@".
+- Do NOT rename via set_properties. Use <rename_instance> instead.
+
+Edit constraints
+- Edits must be sorted by start position and be NON-OVERLAPPING.
+- Keep small: ≤ 20 edits AND ≤ 2000 inserted characters total.
+- Never send an empty edits array.
+
+Safety for instance ops
+- Never delete DataModel or Services. Operate under Workspace unless the user targets another service explicitly.
+- Use only valid Roblox class names for <className>. If unsure, prefer "Part" or "Model".
+
+Path & JSON hygiene
+- No leading/trailing whitespace or code fences inside parameter bodies.
+- Do not include blank lines before/after the outer tool tag.
+- When a segment contains dots/brackets, use bracket notation exactly: game.Workspace["My.Part"]["Wall [A]"]
+
+Examples (correct)
+<create_instance>\n  <className>Part</className>\n  <parentPath>game.Workspace</parentPath>\n  <props>{"Name":"Cell_1_1","Anchored":true,"Size":{"__t":"Vector3","x":4,"y":1,"z":4},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>\n</create_instance>
+
+<set_properties>\n  <path>game.Workspace.Cell_1_1</path>\n  <props>{"Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Plastic"},"@Health":100}</props>\n</set_properties>
+
+<show_diff>\n  <path>game.Workspace.Script</path>\n  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"-- Header\\n"}]</edits>\n</show_diff>`
 
 function tryParseJSON<T = any>(s: unknown): T | undefined {
   if (typeof s !== 'string') return undefined
@@ -71,14 +157,33 @@ function tryParseJSON<T = any>(s: unknown): T | undefined {
   return undefined
 }
 
+function tryParseStrictJSON(s: string): any {
+  try { return JSON.parse(s) } catch { return undefined }
+}
+
 function coercePrimitive(v: string): any {
   const t = v.trim()
   if (t === 'true') return true
   if (t === 'false') return false
   if (t === 'null') return null
   if (!isNaN(Number(t))) return Number(t)
-  const j = tryParseJSON(t)
-  if (j !== undefined) return j
+  // Try strict JSON first
+  const jStrict = tryParseStrictJSON(t)
+  if (jStrict !== undefined) return jStrict
+  // JSON5-like fallback for common LLM outputs: single quotes, unquoted keys, trailing commas, fenced code
+  if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
+    let s = t
+    // Remove surrounding code fences/backticks if present
+    s = s.replace(/^```(?:json)?/i, '').replace(/```$/i, '')
+    // Replace single-quoted strings with double quotes
+    s = s.replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
+    // Quote bare keys: {key: -> {"key":  and , key: -> , "key":
+    s = s.replace(/([\{,]\s*)([A-Za-z_][\w]*)\s*:/g, '$1"$2":')
+    // Remove trailing commas before } or ]
+    s = s.replace(/,\s*([}\]])/g, '$1')
+    const jLoose = tryParseStrictJSON(s)
+    if (jLoose !== undefined) return jLoose
+  }
   return v
 }
 
@@ -97,9 +202,9 @@ function parseToolXML(text: string): { name: string; args: Record<string, any> }
     const raw = m[2]
     args[k] = coercePrimitive(raw)
   }
-  // If no child tags, try parsing whole inner as JSON
+  // If no child tags, try parsing whole inner as JSON (or JSON-like)
   if (Object.keys(args).length === 0) {
-    const asJson = tryParseJSON(inner)
+    const asJson = coercePrimitive(inner)
     if (asJson && typeof asJson === 'object') return { name, args: asJson as any }
   }
   return { name, args }
@@ -107,7 +212,7 @@ function parseToolXML(text: string): { name: string; args: Record<string, any> }
 
 function toEditArray(editsRaw: any): Edit[] | null {
   const parsed = Array.isArray(editsRaw) ? editsRaw : tryParseJSON(editsRaw)
-  if (!parsed || !Array.isArray(parsed)) return null
+  if (!parsed || !Array.isArray(parsed) || parsed.length === 0) return null
   const out: Edit[] = []
   for (const e of parsed) {
     if (
@@ -118,7 +223,27 @@ function toEditArray(editsRaw: any): Edit[] | null {
       out.push({ start: { line: e.start.line, character: e.start.character }, end: { line: e.end.line, character: e.end.character }, text: e.text })
     }
   }
-  return out.length ? out : null
+  if (!out.length) return null
+  // sort by start then end
+  out.sort((a, b) =>
+    (a.start.line - b.start.line) ||
+    (a.start.character - b.start.character) ||
+    (a.end.line - b.end.line) ||
+    (a.end.character - b.end.character)
+  )
+  // ensure non-overlapping ranges
+  for (let i = 1; i < out.length; i++) {
+    const prev = out[i - 1]
+    const cur = out[i]
+    const overlaps = cur.start.line < prev.end.line || (
+      cur.start.line === prev.end.line && cur.start.character < prev.end.character
+    )
+    if (overlaps) return null
+  }
+  // budget caps: max 20 edits, 2000 inserted chars
+  const totalInsertChars = out.reduce((n, e) => n + (e.text ? String(e.text).length : 0), 0)
+  if (out.length > 20 || totalInsertChars > 2000) return null
+  return out
 }
 
 function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInput, msg: string): Proposal[] {
@@ -162,8 +287,10 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
     }
   }
   if (name === 'delete_instance') {
-    const path = ensurePath()
+    const path = ensurePath(selPath)
     if (path) {
+      // Guard: avoid destructive deletes at DataModel or Services level
+      if (/^game(\.[A-Za-z]+Service|\.DataModel)?$/.test(path)) return proposals
       proposals.push({ id: id('obj'), type: 'object_op', ops: [{ op: 'delete_instance', path }], notes: 'Parsed from delete_instance' })
       return proposals
     }
@@ -194,9 +321,18 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
 export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   const msg = input.message.trim()
 
+  // Selection‑aware defaults
+  const selPath = input.context.selection && input.context.selection.length === 1
+    ? input.context.selection[0].path
+    : undefined
+  const selIsContainer = !!selPath && /^(?:game\.(?:Workspace|ReplicatedStorage|ServerStorage|StarterGui|StarterPack|StarterPlayer|Lighting|Teams|SoundService|TextService|CollectionService)|game\.[A-Za-z]+\.[\s\S]+)/.test(selPath)
+
   // Provider gating
   const providerRequested = !!(input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey)
   const useProvider = providerRequested || process.env.VECTOR_USE_OPENROUTER === '1'
+  const streamKey = (input as any).workflowId || input.projectId
+  pushChunk(streamKey, `orchestrator.start provider=${useProvider ? 'openrouter' : 'fallback'} mode=${input.mode || 'agent'}`)
+  console.log(`[orch] start provider=${useProvider ? 'openrouter' : 'fallback'} mode=${input.mode || 'agent'} msgLen=${msg.length}`)
 
   // Deterministic templates for milestone verification
   const lower = msg.toLowerCase()
@@ -260,9 +396,15 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
 
   // Multi-turn Plan/Act loop
   if (useProvider) {
-    const maxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
+    const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
+    const maxTurns = Number(
+      typeof input.maxTurns === 'number'
+        ? input.maxTurns
+        : input.mode === 'ask'
+          ? 1
+          : defaultMaxTurns,
+    )
     const messages: { role: 'user' | 'assistant'; content: string }[] = [{ role: 'user', content: msg }]
-    const streamKey = (input as any).workflowId || input.projectId
     const validationRetryLimit = 2
     const unknownToolRetryLimit = 1
     let unknownToolRetries = 0
@@ -279,9 +421,11 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
           baseUrl: input.provider?.baseUrl,
         })
         content = resp.content || ''
-        pushChunk(streamKey, `provider.response turn=${turn}`)
+        pushChunk(streamKey, `provider.response turn=${turn} chars=${content.length}`)
+        console.log(`[orch] provider.ok turn=${turn} contentLen=${content.length}`)
       } catch (e: any) {
         pushChunk(streamKey, `error.provider ${e?.message || 'unknown'}`)
+        console.error(`[orch] provider.error ${e?.message || 'unknown'}`)
         if (providerRequested) throw new Error(`Provider error: ${e?.message || 'unknown'}`)
         break
       }
@@ -289,19 +433,31 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       const tool = parseToolXML(content)
       if (!tool) {
         pushChunk(streamKey, 'error.validation no tool call parsed')
+        console.warn('[orch] parse.warn no tool call parsed')
         if (providerRequested) throw new Error('Provider returned no parseable tool call')
         break
       }
 
       const name = tool.name as keyof typeof Tools | string
       let a: Record<string, any> = tool.args || {}
+      pushChunk(streamKey, `tool.parsed ${String(name)}`)
+      console.log(`[orch] tool.parsed name=${String(name)}`)
 
-      // Infer missing fields from context (e.g., path)
-      if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
-        a = { ...a, path: input.context.activeScript.path }
-      }
+  // Infer missing fields from context (e.g., path)
+  if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
+    a = { ...a, path: input.context.activeScript.path }
+  }
+  if ((name === 'rename_instance' || name === 'set_properties' || name === 'delete_instance') && !a.path && selPath) {
+    a = { ...a, path: selPath }
+  }
+  if (name === 'create_instance' && !('parentPath' in a)) {
+    a = { ...a, parentPath: selIsContainer ? selPath! : 'game.Workspace' }
+  }
+  if (name === 'insert_asset' && !('parentPath' in a)) {
+    a = { ...a, parentPath: selIsContainer ? selPath! : 'game.Workspace' }
+  }
 
-      // Validate if known tool
+  // Validate if known tool
       const schema = (Tools as any)[name as any] as z.ZodTypeAny | undefined
       if (schema) {
         const parsed = schema.safeParse(a)
@@ -309,6 +465,7 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
           consecutiveValidationErrors++
           const errMsg = parsed.error?.errors?.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ') || 'invalid arguments'
           pushChunk(streamKey, `error.validation ${String(name)} ${errMsg}`)
+          console.warn(`[orch] validation.error tool=${String(name)} ${errMsg}`)
           // Reflect error verbatim and retry (up to limit)
           messages.push({ role: 'assistant', content: toXml(String(name), a) })
           messages.push({ role: 'user', content: `VALIDATION_ERROR ${String(name)}\n${errMsg}` })
@@ -319,6 +476,8 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
         } else {
           consecutiveValidationErrors = 0
           a = parsed.data
+          pushChunk(streamKey, `tool.valid ${String(name)}`)
+          console.log(`[orch] validation.ok tool=${String(name)}`)
         }
       }
 
@@ -347,13 +506,10 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
 
       // Non-context tools → map to proposals and return
       const mapped = mapToolToProposals(String(name), a, input, msg)
-      if (mapped.length) return mapped
-
-      // If model emitted an unknown planning tag like <plan>, carry it forward and continue
-      if (String(name).toLowerCase() === 'plan') {
-        messages.push({ role: 'assistant', content: toXml(String(name), a) })
-        pushChunk(streamKey, 'planning…')
-        continue
+      if (mapped.length) {
+        pushChunk(streamKey, `proposals.mapped ${String(name)} count=${mapped.length}`)
+        console.log(`[orch] proposals.mapped tool=${String(name)} count=${mapped.length}`)
+        return mapped
       }
 
       // Unknown tool: reflect error and allow a limited retry
@@ -361,6 +517,7 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
         unknownToolRetries++
         const errMsg = `Unknown tool: ${String(name)}`
         pushChunk(streamKey, `error.validation ${errMsg}`)
+        console.warn(`[orch] unknown.tool ${String(name)}`)
         messages.push({ role: 'assistant', content: toXml(String(name), a) })
         messages.push({ role: 'user', content: `VALIDATION_ERROR ${String(name)}\n${errMsg}` })
         if (unknownToolRetries > unknownToolRetryLimit) break
@@ -373,7 +530,10 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   }
 
   // Fallbacks: safe, deterministic proposals without provider parsing
-  const fallbacksDisabled = (process.env.VECTOR_DISABLE_FALLBACKS || '1') === '1'
+  const fallbacksEnabled = typeof (input as any).enableFallbacks === 'boolean'
+    ? (input as any).enableFallbacks
+    : (process.env.VECTOR_DISABLE_FALLBACKS || '1') !== '1'
+  const fallbacksDisabled = !fallbacksEnabled
   if (!fallbacksDisabled && input.context.activeScript) {
     const path = input.context.activeScript.path
     const prefixComment = `-- Vector: ${sanitizeComment(msg)}\n`
@@ -381,6 +541,8 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
     const old = input.context.activeScript.text
     const next = applyRangeEdits(old, edits)
     const unified = simpleUnifiedDiff(old, next, path)
+    pushChunk(streamKey, 'fallback.edit commentTop')
+    console.log('[orch] fallback.edit inserting comment at top')
     return [{
       id: id('edit'),
       type: 'edit',
@@ -394,6 +556,8 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
 
   if (!fallbacksDisabled && input.context.selection && input.context.selection.length > 0) {
     const first = input.context.selection[0]
+    pushChunk(streamKey, `fallback.object rename ${first.path}`)
+    console.log(`[orch] fallback.object rename path=${first.path}`)
     return [
       {
         id: id('obj'),
@@ -405,6 +569,8 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   }
 
   if (!fallbacksDisabled) {
+    pushChunk(streamKey, 'fallback.asset search')
+    console.log('[orch] fallback.asset search')
     return [
       { id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } },
     ]

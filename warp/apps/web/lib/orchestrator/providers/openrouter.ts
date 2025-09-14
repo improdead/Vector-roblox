@@ -32,6 +32,7 @@ export async function callOpenRouter(opts: {
 
   const url = (opts.baseUrl ? opts.baseUrl.replace(/\/$/, '') + '/chat/completions' : OPENROUTER_URL)
   const timeoutMs = Number(opts.timeoutMs || process.env.OPENROUTER_TIMEOUT_MS || 30000)
+  const t0 = Date.now()
   const res = await fetchWithTimeout(url, {
     method: 'POST',
     headers: {
@@ -46,9 +47,12 @@ export async function callOpenRouter(opts: {
 
   if (!res.ok) {
     const text = await res.text().catch(() => '')
+    console.error(`[provider.openrouter] error status=${res.status} model=${model} base=${opts.baseUrl || 'default'} bodyLen=${text.length}`)
     throw new Error(`OpenRouter error ${res.status}: ${text}`)
   }
   const json = (await res.json()) as any
   const content: string = json?.choices?.[0]?.message?.content ?? ''
+  const dt = Date.now() - t0
+  console.log(`[provider.openrouter] ok model=${model} base=${opts.baseUrl || 'default'} contentLen=${content.length} dtMs=${dt}`)
   return { content }
 }

@@ -1,4 +1,5 @@
 -- Vector Plugin — minimal chat and proposal UI
+-- UI patch: make composer auto-size and reflow sections
 -- - Collects context (active script + selection)
 -- - Sends to /api/chat
 -- - Renders proposals with Approve/Reject
@@ -11,10 +12,12 @@ local ScriptEditorService = game:GetService("ScriptEditorService")
 local Selection = game:GetService("Selection")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local InsertService = game:GetService("InsertService")
+local UserInputService = game:GetService("UserInputService")
 local ToolCreate = require(script.Parent.tools.create_instance)
 local ToolSetProps = require(script.Parent.tools.set_properties)
 local ToolRename = require(script.Parent.tools.rename_instance)
 local ToolDelete = require(script.Parent.tools.delete_instance)
+local ToolApplyEdit = require(script.Parent.tools.apply_edit)
 
 local function getActiveScriptContext()
 	local s = StudioService.ActiveScript
@@ -42,37 +45,50 @@ local function getSelectionContext()
 end
 
 local function resolveByFullName(path)
-	if type(path) ~= "string" or #path == 0 then
-		return nil
-	end
-	local tokens = string.split(path, ".")
-	local i = 1
-	if tokens[1] == "game" then
-		i = 2
-	end
-	local cur
-	if tokens[i] then
-		local ok, svc = pcall(function()
-			return game:GetService(tokens[i])
-		end)
-		if ok and svc then
-			cur = svc
-		else
-			cur = game:FindFirstChild(tokens[i])
-		end
-		i += 1
-	else
-		cur = game
-	end
-	while cur and tokens[i] do
-		local child = cur:FindFirstChild(tokens[i])
-		if not child then
-			return nil
-		end
-		cur = child
-		i += 1
-	end
-	return cur
+    if typeof(path) == "Instance" then return path end
+    if type(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
 end
 
 local function posToIndex(text, pos)
@@ -174,6 +190,9 @@ local function sha1(msg)
     end
     return string.format("%08x%08x%08x%08x%08x", h0, h1, h2, h3, h4)
 end
+
+-- Expose sha1 globally for tool modules (conflict detection)
+_G.__VECTOR_SHA1 = sha1
 
 -- Diff utilities (line-by-line unified diff)
 local function splitLines(text)
@@ -365,16 +384,8 @@ local function applyEditProposal(proposal)
 		end
 	end
 	local newText = applyRangeEdits(old, proposal.diff.edits or {})
-	if not ChangeHistoryService:TryBeginRecording("Vector Edit", "Vector Edit") then
-		return false, "Cannot start recording"
-	end
-	local ok, err = pcall(function()
-		ScriptEditorService:UpdateSourceAsync(inst, function()
-			return newText
-		end)
-	end)
-	ChangeHistoryService:FinishRecording("Vector Edit")
-	return ok, err
+	local res = ToolApplyEdit({ script = inst, edits = { __finalText = newText }, beforeHash = proposal.safety and proposal.safety.beforeHash or nil })
+	return res and res.ok == true, res and res.error
 end
 
 local function openScriptByPath(path)
@@ -387,10 +398,7 @@ local function openScriptByPath(path)
 end
 
 local function getBackendBaseUrl()
-    local val = plugin:GetSetting("vector_backend_base_url")
-    if typeof(val) == "string" and #val > 0 then
-        return (string.sub(val, -1) == "/") and string.sub(val, 1, -2) or val
-    end
+    -- Settings removed: use local backend for dev; deploy can hardcode env.
     return "http://127.0.0.1:3000"
 end
 
@@ -470,32 +478,312 @@ local function buildUI(gui)
 	root.BackgroundTransparency = 1
 	root.Parent = gui
 
+    -- Small helper to style dark UI controls (Cursor-like)
+    local function styleFrame(f)
+        f.BackgroundTransparency = 0
+        f.BackgroundColor3 = Color3.fromRGB(26, 26, 26)
+        f.BorderSizePixel = 0
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(60, 60, 60)
+        stroke.Thickness = 1
+        stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+        stroke.Parent = f
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = f
+    end
+
+    local function styleButton(b)
+        b.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
+        b.TextColor3 = Color3.fromRGB(230, 230, 230)
+        b.BorderSizePixel = 0
+        b.Font = Enum.Font.Gotham
+        b.TextSize = 14
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(70, 70, 70)
+        stroke.Thickness = 1
+        stroke.Parent = b
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = b
+    end
+
+    local function styleInput(t)
+        t.BackgroundColor3 = Color3.fromRGB(38, 38, 38)
+        t.TextColor3 = Color3.fromRGB(235, 235, 235)
+        t.PlaceholderColor3 = Color3.fromRGB(150, 150, 150)
+        t.BorderSizePixel = 0
+        t.Font = Enum.Font.Gotham
+        t.TextSize = 15
+        t.TextXAlignment = Enum.TextXAlignment.Left
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(70, 70, 70)
+        stroke.Thickness = 1
+        stroke.Parent = t
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = t
+    end
+
+    local function styleChip(frame)
+        frame.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+        frame.BorderSizePixel = 0
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(0, 6)
+        corner.Parent = frame
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(70, 70, 70)
+        stroke.Thickness = 1
+        stroke.Parent = frame
+    end
+
 	local inputRow = Instance.new("Frame")
 	inputRow.Name = "InputRow"
-	inputRow.Size = UDim2.new(1, -8, 0, 36)
-	inputRow.Position = UDim2.new(0, 4, 0, 4)
-	inputRow.BackgroundTransparency = 0.5
-	inputRow.BackgroundColor3 = Color3.fromRGB(28, 28, 28)
+	-- Composer container: no outer border and auto-size vertically
+	inputRow.Size = UDim2.new(1, -12, 0, 0)
+	inputRow.AutomaticSize = Enum.AutomaticSize.Y
+	inputRow.Position = UDim2.new(0, 6, 0, 6)
+	inputRow.BackgroundTransparency = 1
+	inputRow.BorderSizePixel = 0
 	inputRow.Parent = root
 
-	local textBox = Instance.new("TextBox")
-	textBox.PlaceholderText = "Ask Vector…"
-	textBox.Text = ""
-	textBox.ClearTextOnFocus = false
-	textBox.Size = UDim2.new(1, -84, 1, -8)
-	textBox.Position = UDim2.new(0, 4, 0, 4)
-	textBox.Parent = inputRow
+    -- Rebuild composer as a compact card (Cursor-like), suited for sidebar widths
+    inputRow:ClearAllChildren()
+    local card = Instance.new("Frame")
+    card.Name = "Composer"
+    -- Inner card grows with content to avoid clipping
+    card.Size = UDim2.new(1, 0, 0, 0)
+    card.AutomaticSize = Enum.AutomaticSize.Y
+    card.BackgroundTransparency = 0
+    styleFrame(card)
+    card.Parent = inputRow
 
-	local sendBtn = Instance.new("TextButton")
-	sendBtn.Text = "Send"
-	sendBtn.Size = UDim2.new(0, 72, 1, -8)
-	sendBtn.Position = UDim2.new(1, -76, 0, 4)
-	sendBtn.Parent = inputRow
+    local padding = Instance.new("UIPadding")
+    padding.PaddingTop = UDim.new(0, 8)
+    padding.PaddingBottom = UDim.new(0, 8)
+    padding.PaddingLeft = UDim.new(0, 8)
+    padding.PaddingRight = UDim.new(0, 8)
+    padding.Parent = card
+
+    local vlist = Instance.new("UIListLayout")
+    vlist.FillDirection = Enum.FillDirection.Vertical
+    vlist.SortOrder = Enum.SortOrder.LayoutOrder
+    vlist.Padding = UDim.new(0, 6)
+    vlist.Parent = card
+
+    -- Meta row (chips + percent placeholder)
+    local meta = Instance.new("Frame")
+    meta.Name = "Meta"
+    meta.Size = UDim2.new(1, 0, 0, 20)
+    meta.BackgroundTransparency = 1
+    meta.LayoutOrder = 1
+    meta.Parent = card
+    local hlist = Instance.new("UIListLayout")
+    hlist.FillDirection = Enum.FillDirection.Horizontal
+    hlist.Padding = UDim.new(0, 6)
+    hlist.SortOrder = Enum.SortOrder.LayoutOrder
+    hlist.Parent = meta
+
+    local chip1 = Instance.new("Frame")
+    chip1.Size = UDim2.new(0, 24, 1, 0)
+    styleChip(chip1)
+    chip1.Parent = meta
+    local c1 = Instance.new("TextLabel")
+    c1.BackgroundTransparency = 1
+    c1.Size = UDim2.new(1, 0, 1, 0)
+    c1.Font = Enum.Font.Gotham
+    c1.TextSize = 12
+    c1.TextColor3 = Color3.fromRGB(200, 200, 200)
+    c1.Text = "@"
+    c1.Parent = chip1
+
+    local chip2 = Instance.new("Frame")
+    chip2.Size = UDim2.new(0, 60, 1, 0)
+    styleChip(chip2)
+    chip2.Parent = meta
+    local c2 = Instance.new("TextLabel")
+    c2.BackgroundTransparency = 1
+    c2.Size = UDim2.new(1, -8, 1, 0)
+    c2.Position = UDim2.new(0, 8, 0, 0)
+    c2.TextXAlignment = Enum.TextXAlignment.Left
+    c2.Font = Enum.Font.Gotham
+    c2.TextSize = 12
+    c2.TextColor3 = Color3.fromRGB(200, 200, 200)
+    c2.Text = "1 Tab"
+    c2.Parent = chip2
+
+    -- Right-aligned chips (Retry/Next) using an inset container
+    local spacer = Instance.new("Frame")
+    spacer.BackgroundTransparency = 1
+    spacer.Size = UDim2.new(1, -160, 1, 0)
+    spacer.LayoutOrder = 2
+    spacer.Parent = meta
+
+    local retryBtn = Instance.new("TextButton")
+    retryBtn.AutoButtonColor = true
+    retryBtn.Size = UDim2.new(0, 56, 1, 0)
+    retryBtn.Text = "Retry"
+    styleChip(retryBtn)
+    retryBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    retryBtn.Font = Enum.Font.Gotham
+    retryBtn.TextSize = 12
+    retryBtn.Parent = meta
+
+    local nextBtn = Instance.new("TextButton")
+    nextBtn.Size = UDim2.new(0, 52, 1, 0)
+    nextBtn.Text = "Next"
+    styleChip(nextBtn)
+    nextBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    nextBtn.Font = Enum.Font.Gotham
+    nextBtn.TextSize = 12
+    nextBtn.Parent = meta
+
+    -- Percent + spinner chip on the right
+    local pctChip = Instance.new("Frame")
+    pctChip.Size = UDim2.new(0, 62, 1, 0)
+    styleChip(pctChip)
+    pctChip.Parent = meta
+    local pctLbl = Instance.new("TextLabel")
+    pctLbl.BackgroundTransparency = 1
+    pctLbl.Size = UDim2.new(1, -18, 1, 0)
+    pctLbl.Position = UDim2.new(0, 6, 0, 0)
+    pctLbl.TextXAlignment = Enum.TextXAlignment.Left
+    pctLbl.Font = Enum.Font.Gotham
+    pctLbl.TextSize = 12
+    pctLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    pctLbl.Text = "0.0%"
+    pctLbl.Parent = pctChip
+    local spin = Instance.new("TextLabel")
+    spin.BackgroundTransparency = 1
+    spin.Size = UDim2.new(0, 12, 1, 0)
+    spin.Position = UDim2.new(1, -14, 0, 0)
+    spin.Font = Enum.Font.Gotham
+    spin.TextSize = 12
+    spin.TextColor3 = Color3.fromRGB(200, 200, 200)
+    spin.Text = "◴"
+    spin.Parent = pctChip
+    task.spawn(function()
+        local seq = {"◴","◷","◶","◵"}
+        local i = 1
+        while card.Parent do
+            spin.Text = seq[i]
+            i += 1; if i > #seq then i = 1 end
+            task.wait(0.12)
+        end
+    end)
+
+    -- Multiline input box
+    local textBox = Instance.new("TextBox")
+    textBox.LayoutOrder = 3
+    textBox.MultiLine = true
+    textBox.TextWrapped = true
+    textBox.PlaceholderText = "Plan, search, build anything"
+    textBox.Text = ""
+    textBox.ClearTextOnFocus = false
+    textBox.Size = UDim2.new(1, 0, 0, 90)
+    styleInput(textBox)
+    textBox.Parent = card
+
+    -- Controls row: mode pill + model label + send circle
+    local controls = Instance.new("Frame")
+    controls.BackgroundTransparency = 1
+    controls.Size = UDim2.new(1, 0, 0, 28)
+    controls.LayoutOrder = 4
+    controls.Parent = card
+    local h2 = Instance.new("UIListLayout")
+    h2.FillDirection = Enum.FillDirection.Horizontal
+    h2.Padding = UDim.new(0, 8)
+    h2.Parent = controls
+
+    local autoBtn = Instance.new("TextButton")
+    autoBtn.Size = UDim2.new(0, 64, 1, 0)
+    autoBtn.Text = "Auto"
+    styleChip(autoBtn)
+    autoBtn.Parent = controls
+
+    local modeBtn = Instance.new("TextButton")
+    modeBtn.Size = UDim2.new(0, 84, 1, 0)
+    modeBtn.Text = "Agent"
+    styleChip(modeBtn)
+    modeBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    modeBtn.Font = Enum.Font.Gotham
+    modeBtn.TextSize = 12
+    modeBtn.Parent = controls
+
+    local modelBtn = Instance.new("TextButton")
+    modelBtn.AutoButtonColor = false
+    modelBtn.Active = false
+    modelBtn.TextXAlignment = Enum.TextXAlignment.Left
+    -- Adjust for Auto(64) + Mode(84) + Send(28) + 3 gaps(8 each) = 192 + small buffer
+    modelBtn.Size = UDim2.new(1, -196, 1, 0)
+    modelBtn.Text = "grok-code-fast-1"
+    styleChip(modelBtn)
+    modelBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    modelBtn.Font = Enum.Font.Gotham
+    modelBtn.TextSize = 12
+    modelBtn.Parent = controls
+
+    local sendBtn = Instance.new("TextButton")
+    sendBtn.Size = UDim2.new(0, 28, 1, 0)
+    sendBtn.Text = "↑"
+    styleChip(sendBtn)
+    sendBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    sendBtn.Font = Enum.Font.Gotham
+    sendBtn.TextSize = 14
+    sendBtn.Parent = controls
+
+    -- Model selection is managed by backend .env; keep label only
+
+    -- Mode toggle
+    local function setMode(m)
+        CURRENT_MODE = (m == "ask") and "ask" or "agent"
+        if CURRENT_MODE == "ask" then
+            modeBtn.Text = "Ask"
+        else
+            modeBtn.Text = "Agent"
+        end
+    end
+    setMode(CURRENT_MODE)
+    modeBtn.MouseButton1Click:Connect(function()
+        local m = (CURRENT_MODE == "agent") and "ask" or "agent"
+        setMode(m)
+    end)
+
+    -- Auto toggle (apply proposals + continue automatically)
+    _G.__VECTOR_AUTO = _G.__VECTOR_AUTO or false
+    local function setAuto(v)
+        _G.__VECTOR_AUTO = v and true or false
+        autoBtn.Text = _G.__VECTOR_AUTO and "Auto ✓" or "Auto"
+    end
+    setAuto(_G.__VECTOR_AUTO)
+    autoBtn.MouseButton1Click:Connect(function()
+        setAuto(not _G.__VECTOR_AUTO)
+    end)
+
+    -- Initialize model label
+    do modelBtn.Text = "server (.env)" end
+
+	-- Status / Plan area (like Cursor). Reflowed below the composer
+	local statusFrame = Instance.new("ScrollingFrame")
+	statusFrame.Name = "Status"
+    statusFrame.Size = UDim2.new(1, -12, 0, 100)
+    statusFrame.Position = UDim2.new(0, 6, 0, 0) -- y set by reflow()
+	statusFrame.CanvasSize = UDim2.new(0, 0, 0, 0)
+	statusFrame.ScrollBarThickness = 6
+	statusFrame.BackgroundTransparency = 0
+	statusFrame.BackgroundColor3 = Color3.fromRGB(20, 20, 20)
+	styleFrame(statusFrame)
+	statusFrame.Parent = root
+
+	local statusLayout = Instance.new("UIListLayout")
+	statusLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	statusLayout.Padding = UDim.new(0, 2)
+	statusLayout.Parent = statusFrame
 
 	local list = Instance.new("ScrollingFrame")
 	list.Name = "Proposals"
-	list.Size = UDim2.new(1, -8, 1, -48)
-	list.Position = UDim2.new(0, 4, 0, 44)
+    list.Size = UDim2.new(1, -12, 1, 0) -- height set by reflow()
+    list.Position = UDim2.new(0, 6, 0, 0) -- y set by reflow()
 	list.CanvasSize = UDim2.new(0, 0, 0, 0)
 	list.ScrollBarThickness = 8
 	list.BackgroundTransparency = 1
@@ -506,7 +794,72 @@ local function buildUI(gui)
 	layout.Padding = UDim.new(0, 6)
 	layout.Parent = list
 
-	return textBox, sendBtn, list
+    -- Reflow the vertical stack based on composer's height
+    local function reflow()
+        local composerH = inputRow.AbsoluteSize.Y
+        local topAfterComposer = 6 + composerH + 6 -- top padding + composer + gap
+        statusFrame.Position = UDim2.new(0, 6, 0, topAfterComposer)
+        local statusH = statusFrame.Visible and statusFrame.Size.Y.Offset or 0
+        local listTop = topAfterComposer + (statusH > 0 and (statusH + 6) or 0)
+        list.Position = UDim2.new(0, 6, 0, listTop)
+        -- Let the proposals list fill remaining space
+        list.Size = UDim2.new(1, -12, 1, -(listTop + 6))
+    end
+
+    -- Responsive layout function
+    local function applyResponsive(width)
+        -- minimal widths tuned for sidebar; hide pieces when narrow
+        local w = tonumber(width) or 300
+        retryBtn.Visible = w >= 300
+        nextBtn.Visible = w >= 300
+        chip2.Visible = w >= 280
+        modelBtn.Visible = w >= 280
+        pctChip.Visible = w >= 260
+        -- grow input when very narrow
+        if w < 260 then textBox.Size = UDim2.new(1, 0, 0, 70) else textBox.Size = UDim2.new(1, 0, 0, 90) end
+        reflow()
+    end
+
+    -- Keep layout correct as composer content grows/shrinks
+    vlist:GetPropertyChangedSignal("AbsoluteContentSize"):Connect(function()
+        task.defer(reflow)
+    end)
+
+    -- Hide status panel until the first chunk arrives
+    statusFrame.Visible = false
+
+    -- helper to append a status line immediately
+    local function uiAddStatus(text)
+        statusFrame.Visible = true
+        local item = Instance.new("TextLabel")
+        item.Size = UDim2.new(1, -8, 0, 18)
+        item.TextXAlignment = Enum.TextXAlignment.Left
+        item.BackgroundTransparency = 1
+        item.TextColor3 = Color3.fromRGB(150, 150, 150)
+        item.Text = tostring(text)
+        item.Parent = statusFrame
+        statusFrame.CanvasSize = UDim2.new(0, 0, 0, statusFrame.UIListLayout.AbsoluteContentSize.Y + 16)
+        if _G.__VECTOR_UI and _G.__VECTOR_UI.reflow then _G.__VECTOR_UI.reflow() end
+    end
+
+    -- expose UI handles for outer code + progress updater
+    local ui = {
+        textBox = textBox,
+        sendBtn = sendBtn,
+        retryBtn = retryBtn,
+        nextBtn = nextBtn,
+        list = list,
+        statusFrame = statusFrame,
+        applyResponsive = applyResponsive,
+        reflow = reflow,
+        addStatus = uiAddStatus,
+        setProgress = function(p)
+            local v = math.max(0, math.min(100, tonumber(p) or 0))
+            pctLbl.Text = string.format("%.1f%%", v)
+        end,
+    }
+    _G.__VECTOR_UI = ui
+    return ui
 end
 
 local function renderAssetResults(container, p, results)
@@ -760,51 +1113,63 @@ local function renderProposals(list, proposals)
 	list.CanvasSize = UDim2.new(0, 0, 0, list.UIListLayout.AbsoluteContentSize.Y + 16)
 end
 
-local function sendChat(projectId, message, ctx)
+-- In-memory UI state (since settings were removed)
+local CURRENT_MODE = "agent" -- or "ask"
+
+local function sendChat(projectId, message, ctx, workflowId, opts)
     local base = getBackendBaseUrl()
     local url = string.format("%s/api/chat", base)
-    local settings = {
-        baseUrl = plugin:GetSetting("vector_base_url"),
-        apiKey = plugin:GetSetting("vector_api_key"),
-        model = plugin:GetSetting("vector_model"),
-    }
-    local provider
-    if typeof(settings.apiKey) == "string" and #settings.apiKey > 0 then
-        provider = {
-            name = "openrouter",
-            baseUrl = typeof(settings.baseUrl) == "string" and settings.baseUrl or "https://openrouter.ai/api/v1",
-            apiKey = settings.apiKey,
-            model = typeof(settings.model) == "string" and settings.model or "moonshotai/kimi-k2:free",
-        }
-    end
-
+    -- Provider settings now live in backend .env; omit provider in request
     local resp = Http.postJson(url, {
         projectId = projectId,
         message = message,
         context = ctx,
-        provider = provider,
+        provider = nil,
+        workflowId = workflowId,
+        mode = opts and opts.mode or nil,
+        maxTurns = opts and opts.maxTurns or nil,
+        enableFallbacks = opts and opts.enableFallbacks or nil,
     })
     return resp
 end
 
 local toolbar = plugin:CreateToolbar("Vector")
 local toggleButton = toolbar:CreateButton("Vector", "Open Vector chat", "")
-local settingsButton = toolbar:CreateButton("Vector Settings", "Configure provider settings", "")
 
 local activePollers = {}
 
-local function appendStatus(list, text)
+local function appendStatus(container, text)
+    -- Reveal the status panel on first chunk
+    if container and container.Visible == false then
+        container.Visible = true
+        if _G.__VECTOR_UI and _G.__VECTOR_UI.reflow then
+            pcall(function() _G.__VECTOR_UI.reflow() end)
+        end
+    end
     local item = Instance.new("TextLabel")
     item.Size = UDim2.new(1, -8, 0, 18)
     item.TextXAlignment = Enum.TextXAlignment.Left
     item.BackgroundTransparency = 1
     item.TextColor3 = Color3.fromRGB(140, 140, 140)
     item.Text = tostring(text)
-    item.Parent = list
-    list.CanvasSize = UDim2.new(0, 0, 0, list.UIListLayout.AbsoluteContentSize.Y + 16)
+    item.Parent = container
+    container.CanvasSize = UDim2.new(0, 0, 0, container.UIListLayout.AbsoluteContentSize.Y + 16)
+    -- Heuristic progress mapping for sidebar percent chip
+    local line = tostring(text)
+    local bump = nil
+    if string.find(line, "planning:") then bump = 5 end
+    if string.find(line, "provider.response") then bump = 60 end
+    if string.find(line, "proposals.mapped") then bump = 90 end
+    if string.find(line, "fallback") then bump = 40 end
+    if bump then
+        _G.__VECTOR_PROGRESS = math.max(_G.__VECTOR_PROGRESS or 0, bump)
+        if _G.__VECTOR_UI and _G.__VECTOR_UI.setProgress then
+            _G.__VECTOR_UI.setProgress(_G.__VECTOR_PROGRESS)
+        end
+    end
 end
 
-local function startStreamPoller(workflowId, list)
+local function startStreamPoller(workflowId, statusContainer)
     if activePollers[workflowId] then return end
     activePollers[workflowId] = true
     task.spawn(function()
@@ -815,7 +1180,7 @@ local function startStreamPoller(workflowId, list)
             local url = string.format("%s/api/stream?workflowId=%s&cursor=%d", base, HttpService:UrlEncode(workflowId), cursor)
             local resp = Http.getJson(url)
             if not resp.Success then
-                appendStatus(list, "stream error: HTTP " .. tostring(resp.StatusCode))
+                appendStatus(statusContainer, "stream error: HTTP " .. tostring(resp.StatusCode))
                 break
             end
             local ok, js = pcall(function() return HttpService:JSONDecode(resp.Body) end)
@@ -823,7 +1188,7 @@ local function startStreamPoller(workflowId, list)
                 cursor = js.cursor or cursor
                 local chunks = js.chunks
                 if #chunks > 0 then idle = 0 end
-                for _, line in ipairs(chunks) do appendStatus(list, line) end
+                for _, line in ipairs(chunks) do appendStatus(statusContainer, line) end
             else
                 idle += 1
             end
@@ -834,139 +1199,228 @@ local function startStreamPoller(workflowId, list)
 end
 
 toggleButton.Click:Connect(function()
-	local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Left, true, false, 360, 480, 240, 320)
+	local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, true, false, 320, 520, 260, 360)
 	local gui = plugin:CreateDockWidgetPluginGui("VectorDock", info)
 	gui.Title = "Vector"
 
-	local input, sendBtn, list = buildUI(gui)
-
-	sendBtn.MouseButton1Click:Connect(function()
-		local ctx = {
-			activeScript = getActiveScriptContext(),
-			selection = getSelectionContext(),
-		}
-		local resp = sendChat("local", input.Text, ctx)
-    if not resp.Success then
-        local item = Instance.new("TextLabel")
-        item.Size = UDim2.new(1, -8, 0, 48)
-        item.TextWrapped = true
-        item.Text = "HTTP " .. tostring(resp.StatusCode) .. ": " .. (resp.Body or "")
-        item.BackgroundTransparency = 1
-        item.Parent = list
-        return
-    end
-    local ok, parsed = pcall(function()
-        return HttpService:JSONDecode(resp.Body)
-    end)
-    if not ok then
-        local item = Instance.new("TextLabel")
-        item.Size = UDim2.new(1, -8, 0, 24)
-        item.Text = "Invalid JSON from server"
-        item.BackgroundTransparency = 1
-        item.Parent = list
-        return
-    end
-    if parsed.error then
-        local item = Instance.new("TextLabel")
-        item.Size = UDim2.new(1, -8, 0, 48)
-        item.TextWrapped = true
-        item.Text = "Error: " .. tostring(parsed.error)
-        item.BackgroundTransparency = 1
-        item.Parent = list
-        return
-    end
-    renderProposals(list, parsed.proposals or {})
-    if parsed.workflowId then
-        startStreamPoller(parsed.workflowId, list)
-    end
+	local ui = buildUI(gui)
+	-- Responsive: reflow when the dock is resized
+	pcall(function()
+		gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
+		end)
+		if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
 	end)
-end)
 
--- Settings UI (API Provider)
-local function loadProviderSettings()
-    local baseUrl = plugin:GetSetting("vector_base_url")
-    local apiKey = plugin:GetSetting("vector_api_key")
-    local model = plugin:GetSetting("vector_model")
-    local backend = plugin:GetSetting("vector_backend_base_url")
-    return {
-        baseUrl = typeof(baseUrl) == "string" and baseUrl or "https://openrouter.ai/api/v1",
-        apiKey = typeof(apiKey) == "string" and apiKey or "",
-        model = typeof(model) == "string" and model or "moonshotai/kimi-k2:free",
-        backend = typeof(backend) == "string" and backend or "http://127.0.0.1:3000",
-    }
-end
+		local lastMessage = ""
+		local lastCtx = nil
+		local lastWorkflowId = nil
 
-local function saveProviderSettings(s)
-    if s.baseUrl then plugin:SetSetting("vector_base_url", s.baseUrl) end
-    if s.apiKey ~= nil then plugin:SetSetting("vector_api_key", s.apiKey) end
-    if s.model then plugin:SetSetting("vector_model", s.model) end
-    if s.backend then plugin:SetSetting("vector_backend_base_url", s.backend) end
-end
+        -- Auto helpers
+        local function autoApplyProposal(p)
+            if p.type == "edit" then
+                ui.addStatus("auto.apply edit → " .. (p.path or ""))
+                local ok, err = applyEditProposal(p)
+                ui.addStatus(ok and "auto.ok" or ("auto.err " .. tostring(err)))
+                reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
+                return ok
+            elseif p.type == "object_op" and p.ops then
+                local appliedAny = false
+                for _, op in ipairs(p.ops) do
+                    if op.op == "create_instance" then
+                        ui.addStatus("auto.create " .. tostring(op.className) .. " under " .. tostring(op.parentPath))
+                        local res = ToolCreate(op.className, op.parentPath, op.props)
+                        appliedAny = appliedAny or (res and res.ok == true)
+                        reportApply(p.id, { ok = res and res.ok == true, type = p.type, op = op.op, className = op.className, parentPath = op.parentPath, path = res and res.path, error = res and res.error })
+                    elseif op.op == "set_properties" then
+                        ui.addStatus("auto.set_properties → " .. tostring(op.path))
+                        local res = ToolSetProps(op.path, op.props)
+                        local ok = res and res.ok == true
+                        appliedAny = appliedAny or ok
+                        local infoOrErr = (res and res.errors and #res.errors > 0) and HttpService:JSONEncode(res.errors) or (res and res.error)
+                        reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, props = op.props, error = infoOrErr })
+                    elseif op.op == "rename_instance" then
+                        ui.addStatus("auto.rename → " .. tostring(op.path))
+                        local ok, infoOrErr = applyRenameOp(op)
+                        appliedAny = appliedAny or ok
+                        reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, newName = op.newName, error = infoOrErr })
+                    elseif op.op == "delete_instance" then
+                        ui.addStatus("auto.delete → " .. tostring(op.path))
+                        local res = ToolDelete(op.path)
+                        local ok = res and res.ok == true
+                        appliedAny = appliedAny or ok
+                        reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, error = res and res.error })
+                    end
+                end
+                return appliedAny
+            elseif p.type == "asset_op" then
+                ui.addStatus("auto.asset_op (skipped—requires user choice)")
+                return false
+            end
+            return false
+        end
 
-local function openSettings()
-    local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Float, true, false, 420, 360, 360, 300)
-    local gui = plugin:CreateDockWidgetPluginGui("VectorSettings", info)
-    gui.Title = "Vector Settings"
+        local function maybeAutoContinue(workflowId)
+            if not _G.__VECTOR_AUTO then return end
+            local maxSteps = 6
+            local steps = 0
+            task.spawn(function()
+                while _G.__VECTOR_AUTO and steps < maxSteps do
+                    steps += 1
+                    ui.addStatus("auto.next step " .. tostring(steps))
+                    local followup = "Next step: propose exactly one small, safe action."
+                    local mode = CURRENT_MODE
+                    local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = (mode == "ask") and true or nil, modelOverride = nil }
+                    local resp = sendChat("local", followup, { activeScript = getActiveScriptContext(), selection = getSelectionContext() }, workflowId, opts)
+                    if not resp.Success then ui.addStatus("auto.http " .. tostring(resp.StatusCode)); break end
+                    local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+                    if not ok or parsed.error then ui.addStatus("auto.err invalid json"); break end
+                    renderProposals(ui.list, parsed.proposals or {})
+                    if parsed.workflowId then startStreamPoller(parsed.workflowId, ui.statusFrame) end
+                    local gotAny = false
+                    for _, p in ipairs(parsed.proposals or {}) do
+                        gotAny = true
+                        autoApplyProposal(p)
+                    end
+                    if not gotAny then break end
+                end
+                ui.addStatus("auto.done")
+            end)
+        end
 
-    local root = Instance.new("Frame")
-    root.Size = UDim2.new(1, 0, 1, 0)
-    root.BackgroundTransparency = 1
-    root.Parent = gui
+	    -- Extract send flow so both button and Enter key can trigger it
+	    local function runSend()
+	        local ctx = {
+	            activeScript = getActiveScriptContext(),
+	            selection = getSelectionContext(),
+	        }
+	        lastMessage = ui.textBox.Text
+	        lastCtx = ctx
+	        -- Reset status view (and hide until we receive chunks)
+	        for _, child in ipairs(ui.statusFrame:GetChildren()) do if child:IsA("TextLabel") then child:Destroy() end end
+	        ui.statusFrame.Visible = false
+	        if ui.reflow then ui.reflow() end
+			local mode = CURRENT_MODE
+			local opts = {
+				mode = mode,
+				maxTurns = (mode == "ask") and 1 or nil,
+				enableFallbacks = (mode == "ask") and true or nil,
+				modelOverride = nil,
+			}
+			local resp = sendChat("local", ui.textBox.Text, ctx, nil, opts)
+	    if not resp.Success then
+	        local item = Instance.new("TextLabel")
+	        item.Size = UDim2.new(1, -8, 0, 48)
+	        item.TextWrapped = true
+	        item.Text = "HTTP " .. tostring(resp.StatusCode) .. ": " .. (resp.Body or "")
+	        item.BackgroundTransparency = 1
+	        item.Parent = ui.list
+	        return
+	    end
+	    local ok, parsed = pcall(function()
+	        return HttpService:JSONDecode(resp.Body)
+	    end)
+	    if not ok then
+	        local item = Instance.new("TextLabel")
+	        item.Size = UDim2.new(1, -8, 0, 24)
+	        item.Text = "Invalid JSON from server"
+	        item.BackgroundTransparency = 1
+	        item.Parent = ui.list
+	        return
+	    end
+	    if parsed.error then
+	        local item = Instance.new("TextLabel")
+	        item.Size = UDim2.new(1, -8, 0, 48)
+	        item.TextWrapped = true
+	        item.Text = "Error: " .. tostring(parsed.error)
+	        item.BackgroundTransparency = 1
+	        item.Parent = ui.list
+	        return
+	    end
+	    renderProposals(ui.list, parsed.proposals or {})
+	    if parsed.workflowId then
+	        lastWorkflowId = parsed.workflowId
+	        startStreamPoller(parsed.workflowId, ui.statusFrame)
+	    end
+	    if _G.__VECTOR_AUTO then
+	        for _, p in ipairs(parsed.proposals or {}) do autoApplyProposal(p) end
+	        if parsed.workflowId then maybeAutoContinue(parsed.workflowId) end
+	    end
+		end
 
-    local function mkLabel(text, y)
-        local l = Instance.new("TextLabel")
-        l.Text = text
-        l.TextXAlignment = Enum.TextXAlignment.Left
-        l.BackgroundTransparency = 1
-        l.Position = UDim2.new(0, 12, 0, y)
-        l.Size = UDim2.new(1, -24, 0, 20)
-        l.Parent = root
-        return l
-    end
-    local function mkInput(y)
-        local t = Instance.new("TextBox")
-        t.Size = UDim2.new(1, -24, 0, 28)
-        t.Position = UDim2.new(0, 12, 0, y)
-        t.BackgroundColor3 = Color3.fromRGB(36, 36, 36)
-        t.TextXAlignment = Enum.TextXAlignment.Left
-        t.Text = ""
-        t.ClearTextOnFocus = false
-        t.Parent = root
-        return t
-    end
+	    ui.sendBtn.MouseButton1Click:Connect(runSend)
 
-    local cfg = loadProviderSettings()
-    mkLabel("API Provider: OpenAI Compatible (OpenRouter)", 12)
-    mkLabel("Base URL", 42)
-    local baseInput = mkInput(62)
-    baseInput.Text = cfg.baseUrl
-
-    mkLabel("API Key", 98)
-    local keyInput = mkInput(118)
-    keyInput.Text = cfg.apiKey
-
-    mkLabel("Model ID", 154)
-    local modelInput = mkInput(174)
-    modelInput.Text = cfg.model
-
-    mkLabel("Backend Base URL (Next.js)", 210)
-    local backendInput = mkInput(230)
-    backendInput.Text = cfg.backend
-
-    local saveBtn = Instance.new("TextButton")
-    saveBtn.Text = "Done"
-    saveBtn.Size = UDim2.new(0, 96, 0, 28)
-    saveBtn.Position = UDim2.new(1, -108, 1, -40)
-    saveBtn.Parent = root
-    saveBtn.MouseButton1Click:Connect(function()
-        saveProviderSettings({ baseUrl = baseInput.Text, apiKey = keyInput.Text, model = modelInput.Text, backend = backendInput.Text })
-        gui.Enabled = false
-        gui:Destroy()
+	    -- Enter-to-Send: Enter sends, Shift+Enter inserts newline
+	    local enterConn: RBXScriptConnection? = nil
+    ui.textBox.Focused:Connect(function()
+        if enterConn then enterConn:Disconnect() end
+        -- Bind directly to the TextBox to ensure we see Return even when Roblox marks it as game-processed
+        enterConn = ui.textBox.InputBegan:Connect(function(input)
+            if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Return then
+                local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+                if not shift then
+                    runSend()
+                    -- Trim a trailing newline if the TextBox inserted one
+                    ui.textBox.Text = string.gsub(ui.textBox.Text, "\r?\n$", "")
+                end
+            end
+        end)
     end)
-end
+    ui.textBox.FocusLost:Connect(function(enterPressed)
+        if enterPressed then
+            -- Some Studio versions report enterPressed even for multi-line; treat as send
+            runSend()
+            ui.textBox.Text = string.gsub(ui.textBox.Text, "\r?\n$", "")
+        end
+        if enterConn then enterConn:Disconnect(); enterConn = nil end
+    end)
 
-settingsButton.Click:Connect(function()
-    openSettings()
+    ui.retryBtn.MouseButton1Click:Connect(function()
+        if lastMessage == "" then return end
+        -- Re-run same prompt as a new workflow
+        ui.sendBtn.Text = "Sending…"; ui.sendBtn.AutoButtonColor = false
+        local mode = CURRENT_MODE
+        local opts = {
+            mode = mode,
+            maxTurns = (mode == "ask") and 1 or nil,
+            enableFallbacks = (mode == "ask") and true or nil,
+            modelOverride = nil,
+        }
+        local resp = sendChat("local", lastMessage, lastCtx, nil, opts)
+        ui.sendBtn.Text = "Send"; ui.sendBtn.AutoButtonColor = true
+        if not resp.Success then return end
+        local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+        if not ok or parsed.error then return end
+        renderProposals(ui.list, parsed.proposals or {})
+        if parsed.workflowId then
+            lastWorkflowId = parsed.workflowId
+            startStreamPoller(parsed.workflowId, ui.statusFrame)
+        end
+    end)
+
+    ui.nextBtn.MouseButton1Click:Connect(function()
+        if not lastWorkflowId then return end
+        -- Ask the backend to continue with the next atomic step on the same workflow
+        local followup = "Next step: propose exactly one small, safe action."
+        local mode = CURRENT_MODE
+        local opts = {
+            mode = mode,
+            maxTurns = (mode == "ask") and 1 or nil,
+            enableFallbacks = (mode == "ask") and true or nil,
+            modelOverride = nil,
+        }
+        local resp = sendChat("local", followup, {
+            activeScript = getActiveScriptContext(),
+            selection = getSelectionContext(),
+        }, lastWorkflowId, opts)
+        if not resp.Success then return end
+        local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+        if not ok or parsed.error then return end
+        renderProposals(ui.list, parsed.proposals or {})
+        if parsed.workflowId then
+            startStreamPoller(parsed.workflowId, ui.statusFrame)
+        end
+    end)
 end)
 
 return {}

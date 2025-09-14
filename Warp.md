@@ -6,7 +6,7 @@
 
 ## 0) What this is
 
-* **Studio Plugin (Luau)**: docked chat + proposals, reads active editor state, previews diffs, applies edits inside **ChangeHistoryService**.
+* **Studio Plugin (Luau)**: docked chat + proposals, reads active editor state, previews diffs, applies edits inside **ChangeHistoryService**. Provider configuration is read from the backend `.env`.
 * **Next.js Backend (TypeScript)**: `/api/chat`, `/api/stream`, `/api/proposals/:id/apply`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM.
 * **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval.
 
@@ -38,11 +38,33 @@ Wait for each tool result before the next step.
 - search_assets(query,tags?,limit?)
 - insert_asset(assetId,parentPath)
 
+Parameter encoding
+- For objects/arrays, the inner text MUST be strict JSON (double quotes; no trailing commas). Never wrap JSON in quotes. No code fences.
+  - Right: `<props>{"Name":"Part","Anchored":true}</props>`
+  - Wrong: `<props>"{\"Name\":\"Part\"}"</props>`
+
 Rules:
 - Never modify code or instances without an approved proposal.
 - Keep context small; ask for more only when needed.
 - Prefer minimal diffs and property deltas.
 - Reference Roblox paths by canonical `GetFullName()`.
+- Names should be alphanumeric/underscore only; avoid dots/slashes when creating new Instances.
+- Existing special characters can be referenced with bracket segments: `game.Workspace["My.Part"]["Wall [A]"]`.
+ - Selection defaults: when a single instance is selected in Studio, infer missing `path`/`parentPath` for common tools (rename/set/delete/create/insert) using that selection; otherwise default to `game.Workspace`.
+ - Edit constraints: keep edits sorted and non‑overlapping; cap size (≤20 edits, ≤2000 inserted characters).
+
+Roblox typed values (wrappers)
+- Use `__t` wrappers for structured types in `props`:
+  - Vector3 `{ "__t":"Vector3", "x":0, "y":1, "z":0 }`
+  - Vector2 `{ "__t":"Vector2", "x":0, "y":0 }`
+  - Color3 `{ "__t":"Color3", "r":1, "g":0.5, "b":0.25 }`
+  - UDim `{ "__t":"UDim", "scale":0, "offset":16 }`
+  - UDim2 `{ "__t":"UDim2", "x":{ "scale":0, "offset":0 }, "y":{ "scale":0, "offset":0 } }`
+  - CFrame `{ "__t":"CFrame", "comps": [x,y,z, r00,r01,r02, r10,r11,r12, r20,r21,r22] }`
+  - EnumItem `{ "__t":"EnumItem", "enum":"Enum.Material", "name":"Plastic" }`
+  - BrickColor `{ "__t":"BrickColor", "name":"Bright red" }`
+  - Instance ref `{ "__t":"Instance", "path":"game.ReplicatedStorage.Template" }`
+- Attributes: prefix keys with `@`, e.g., `{ "@Health": 100 }`.
 ```
 
 > Optional: **Plan vs Act** modes. In *Plan* mode, gather info and outline a plan. In *Act* mode, execute tools one step at a time.
@@ -201,7 +223,7 @@ const ChatSchema = z.object({
   projectId: z.string(),
   message: z.string(),
   context: z.object({
-    activeScript: z.object({ path: z.string(), text: z.string() }).nullable(),
+    activeScript: z.object({ path: z.string(), text: z.string() }).nullable().optional(),
     selection: z.array(z.object({ className: z.string(), path: z.string() })).optional(),
     openDocs: z.array(z.object({ path: z.string() })).optional()
   })
@@ -291,6 +313,18 @@ end
 **Permissions**
 
 * The **plugin** calls your backend domain only (user approves once via the built‑in HTTP permission prompt). The backend talks to Roblox’s web APIs.
+
+---
+
+## 5a) 3D Generation (Meshy)
+
+- Endpoint: `POST /api/assets/generate3d` now proxies to Meshy’s text-to-3D API.
+- Auth: uses `Authorization: Bearer <key>` from the request header (sent by the Studio plugin) or `MESHY_API_KEY` env on the backend.
+- Config: `MESHY_API_URL` (default `https://api.meshy.ai/openapi/v2/text-to-3d`), `MESHY_TIMEOUT_MS`.
+- Plugin: Settings adds “Meshy API Key (3D Generation)” and sends it as a bearer header when enqueuing jobs.
+- Response: `{ jobId, provider: 'meshy' }` (job status/polling can be added next).
+
+Note: For local dev, set `MESHY_API_KEY` in `warp/apps/web/.env.local`. Later we can add secure server-side storage for multi-user deployments.
 
 ---
 
@@ -912,26 +946,33 @@ Working now
   - Approve/Reject per proposal; applies:
     - edit proposals that insert text via rangeEDITS (merged, UpdateSourceAsync with undo)
     - object_op rename_instance (ChangeHistoryService wrapped)
-  - Settings panel: Base URL, API Key, Model ID; per-request provider used by /api/chat.
+  - Provider settings panel removed (env-driven). Backend reads provider creds from `.env.local`.
   - Reports apply results back to /api/proposals/:id/apply for auditing.
   - Diff preview snippet: shows unified diff from server for quick review.
+  - Sidebar UX (Cursor-like): top composer + “Retry” and “Next” buttons; a dedicated “Status” panel streams planning/progress lines; proposals list below.
 
 
 ---
 
-## Local Provider Settings (no .env required)
+## Local Provider Settings (via backend .env)
 
-- Goal: avoid committing secrets to git. Configure provider credentials inside Roblox Studio, per-user.
-- Open the toolbar item "Vector Settings" to configure:
-  - Base URL: e.g., `https://openrouter.ai/api/v1` (OpenAI-compatible)
-  - API Key: your provider key (stored locally via `plugin:SetSetting`, never committed)
-  - Model ID: e.g., `moonshotai/kimi-k2:free` or `deepseek/deepseek-chat`
-  - Backend Base URL (Next.js): e.g., `http://127.0.0.1:3000` for local dev, or your deployed Vercel URL.
+- Configure provider credentials in `warp/apps/web/.env.local` instead of Studio settings.
+- Example `.env.local` (already added):
+  - `OPENROUTER_API_KEY=` (leave blank to use fallbacks)
+  - `OPENROUTER_MODEL=moonshotai/kimi-k2:free`
+  - `VECTOR_USE_OPENROUTER=0` (set to `1` to enable provider)
 - Transport & Security:
-  - The plugin sends `provider` in the `/api/chat` body: `{ name:'openrouter', baseUrl, apiKey, model }`.
-  - The plugin uses the Backend Base URL for all HTTP calls to your app (`/api/chat`, `/api/proposals/:id/apply`, `/api/assets/search`, etc.).
-  - The server uses the provider values for the provider call and does not persist them (only proposals are stored).
+  - The plugin does not send provider credentials; the backend reads `process.env`.
+  - The plugin calls your backend at `http://127.0.0.1:3000` by default in dev.
   - `.gitignore` excludes env files under `warp/apps/web` and the local `data/` folder.
+
+---
+
+## Tool Invocation (Plugin)
+
+- Decision: fully dispatch through `src/tools/*.lua`. The main plugin only parses proposals and routes to tool modules.
+- Flow: parse proposal → route to tool → tool wraps in `ChangeHistoryService` → one undo step per action.
+- Tools used: `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `apply_edit`.
 
 
 ---
@@ -1213,3 +1254,86 @@ Each provider call includes:
 - **Ask**: “Propose the **next single tool** to advance the subgoal.”
 
 **Result:** The model doesn’t waste calls re‑reading the codebase and always “knows what it did last,” because the orchestrator supplies a verifiable memory of actions and state.
+
+---
+
+## System Wiring Audit (Repo Snapshot)
+
+- Web Orchestrator: `warp/apps/web/lib/orchestrator/index.ts` maps tool calls → proposals and streams status via `/api/stream`.
+- Tool Schemas (web): `warp/apps/web/lib/tools/schemas.ts` defines these tools: `get_active_script`, `list_selection`, `list_open_documents`, `show_diff`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, `generate_asset_3d`.
+- Plugin Tools (Luau): `warp/plugin/src/tools/` implements: `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, plus extra read tools `get_properties`, `list_children`.
+- API Routes (web):
+  - `POST /api/chat` → orchestrator → proposals persisted (`lib/store/proposals.ts`) and workflow steps (`lib/store/workflows.ts`).
+  - `GET /api/stream` → long‑poll streaming of orchestrator logs.
+  - `POST /api/proposals/:id/apply` → marks proposal applied (plugin reports applies here).
+  - `GET /api/assets/search` → catalog proxy with stub fallback.
+  - `POST /api/assets/generate3d` → stub job enqueue (returns `jobId`).
+
+Alignment notes
+- Match: All “action” tools in schemas have corresponding plugin handlers, except `show_diff` (web‑only preview tool, mapped to proposals).
+- Plugin‑only reads: `get_properties.lua`, `list_children.lua` exist but are not wired in the web tool schema or orchestrator yet.
+- Web‑only: `show_diff` exists in schemas/orchestrator for diff preview; no plugin tool required because plugin renders diffs from proposals.
+
+Duplicates (expected)
+- Edit merge/diff: implemented in both TS (`lib/diff/rangeEdits.ts`) and Luau (`plugin/src/main.server.lua`) because each runtime needs it. Not a wiring bug.
+
+---
+
+## Placeholders & Gaps
+
+- `apps/web/lib/orchestrator/providers/openai.ts`: placeholder adapter; not used. Use OpenRouter by setting env in the backend and `VECTOR_USE_OPENROUTER=1`.
+- `apps/web/app/api/assets/generate3d/route.ts`: stub; returns a `jobId` only. No GPU backend yet.
+- `apps/web/lib/catalog/search.ts`: real provider requires `CATALOG_API_URL` (optional `CATALOG_API_KEY`). If unset, serves stubbed results.
+- `plugin/src/tools/list_open_documents.lua`: placeholder due to limited Studio APIs; returns only the active script.
+- `plugin/src/tools/get_properties.lua`, `plugin/src/tools/list_children.lua`: implemented but not exposed in the web tool schema; currently unused by the LLM.
+
+Optional next steps
+- Decide whether to surface `get_properties`/`list_children` as read‑only “context tools” in the web tool registry.
+- Implement real 3D generation backend or hide `generate_asset_3d` until ready.
+
+---
+
+## Local Testing Checklist
+
+- Prereqs: Node 18+, Roblox Studio, Rojo (optional for syncing).
+- Backend (Next.js):
+  - `cd warp/apps/web && npm install`
+  - `npm run dev` (listens on `http://127.0.0.1:3000`)
+  - Optional env:
+    - `OPENROUTER_API_KEY` (if using provider)
+    - `OPENROUTER_MODEL` (default: `moonshotai/kimi-k2:free`)
+    - `VECTOR_USE_OPENROUTER=1` (forces provider use without plugin‑supplied key)
+    - `CATALOG_API_URL` (real catalog search) and `CATALOG_API_KEY` (optional)
+- Plugin (Studio):
+  - Load the plugin source at `warp/plugin/src` (via Rojo or manual install).
+  - No Studio settings required. Start the backend (`npm run dev`) and configure `.env.local`.
+  - Use the chat dock: send a prompt with an active script open. With no provider, fallbacks will propose a safe edit (insert comment), simple rename, or asset search.
+- Quick endpoint checks:
+  - `GET /api/assets/search?query=test&limit=3` → returns 3 stub items if no catalog provider configured.
+  - `POST /api/assets/generate3d` with `{"prompt":"cube"}` → returns a `jobId`.
+
+---
+
+## Logging & Observability (Added)
+
+- Orchestrator (`[orch]` + stream):
+  - Start: `orchestrator.start provider=… mode=…`
+  - Provider calls: `provider.response turn=X chars=Y` (and console `[orch] provider.ok/error …`)
+  - Tool flow: `tool.parsed NAME`, `tool.valid NAME`, `proposals.mapped NAME count=N`.
+  - Fallbacks: `fallback.edit`, `fallback.object`, `fallback.asset`.
+- Chat route (`[chat]`): request summary + proposals stored.
+- Assets routes (`[assets.search]`, `[assets.generate3d]`): query, counts, timings.
+- Catalog provider (`[catalog]`): stub vs provider, timings, errors.
+- Proposals apply (`[proposals.apply]`): id, workflow id, payload keys.
+
+All of the above log to the Next.js terminal by default. The same high‑signal events also stream to the plugin via `/api/stream` so you can see the live turn‑by‑turn state.
+
+---
+
+## Tool Inventory (Web ↔ Plugin)
+
+- Shared (wired): `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`.
+- Web‑only: `show_diff` (proposal preview), `generate_asset_3d` (stubbed API; plugin calls endpoint).
+- Plugin‑only (currently unused by LLM): `get_properties`, `list_children`.
+
+No hard duplicates in a single runtime; mirrored implementations across TS/Luau are expected.

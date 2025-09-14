@@ -13,7 +13,12 @@ end
 return function(prompt, opts)
     local body = { prompt = prompt, tags = opts and opts.tags or nil, style = opts and opts.style or nil, budget = opts and opts.budget or nil }
     local base = getBackendBaseUrl()
-    local resp = Http.postJson(base .. "/api/assets/generate3d", body)
+    local headers = {}
+    local meshyKey = plugin and plugin:GetSetting and plugin:GetSetting("vector_meshy_api_key")
+    if typeof(meshyKey) == "string" and #meshyKey > 0 then
+        headers["Authorization"] = "Bearer " .. meshyKey
+    end
+    local resp = Http.postJson(base .. "/api/assets/generate3d", body, headers)
     if not resp.Success then
         return { ok = false, error = "HTTP " .. tostring(resp.StatusCode) }
     end

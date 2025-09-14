@@ -21,5 +21,8 @@ export async function POST(req: Request, ctx: { params: { id: string } }) {
       updateStep(after.workflowId, id, { status: 'completed' })
     }
   } catch {}
+  console.log(
+    `[proposals.apply] id=${id} ok=${!!after} workflowId=${after?.workflowId || 'n/a'} payloadKeys=${Object.keys(body || {}).length}`,
+  )
   return Response.json({ ok: true, id, before, after })
 }
