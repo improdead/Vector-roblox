@@ -3,18 +3,18 @@
   "name": "VectorPlugin",
   "tree": {
     "$className": "Folder",
-    "Vector": {
-      "$className": "Folder",
-      "Main": {
-        "$path": "src/main.server.lua",
-        "$properties": {
-          "Name": "Main",
-          "RunContext": "Plugin",
-          "Disabled": false
-        }
-      },
-      "tools": { "$path": "src/tools" },
-      "net": { "$path": "src/net" }
+    "Main": {
+      "$path": "src/main.server.lua",
+      "$properties": {
+        "RunContext": "Plugin",
+        "Disabled": false
+      }
+    },
+    "tools": {
+      "$path": "src/tools"
+    },
+    "net": {
+      "$path": "src/net"
     }
   }
 }
