@@ -1,4 +1,4 @@
-# WARP — Roblox Studio Copilot (Cline‑style tools, context, edits, and Asset Store)
+# Vector — Roblox Studio Copilot (Cline‑style tools, context, edits, and Asset Store)
 
 > An implementation plan for a **Roblox Studio AI copilot** with a **Next.js** backend and an **LLM tool‑calling orchestrator**, refined to mirror Cline’s step‑by‑step tool usage, context management, and diff‑first editing.
 
@@ -324,7 +324,7 @@ end
 - Plugin: Settings adds “Meshy API Key (3D Generation)” and sends it as a bearer header when enqueuing jobs.
 - Response: `{ jobId, provider: 'meshy' }` (job status/polling can be added next).
 
-Note: For local dev, set `MESHY_API_KEY` in `warp/apps/web/.env.local`. Later we can add secure server-side storage for multi-user deployments.
+Note: For local dev, set `MESHY_API_KEY` in `vector/apps/web/.env.local`. Later we can add secure server-side storage for multi-user deployments.
 
 ---
 
@@ -847,7 +847,7 @@ flowchart LR
 # 7) File structure (monorepo)
 
 ```
-warp/
+vector/
   apps/
     web/                # Next.js (Vercel)
       app/api/chat/route.ts
@@ -873,7 +873,7 @@ warp/
     stylua.toml
   infra/                # GPU jobs, queues, Open Cloud uploader
   README.md
-  WARP.md
+  Vector.md
 ```
 
 **Style/linting**
@@ -956,7 +956,7 @@ Working now
 
 ## Local Provider Settings (via backend .env)
 
-- Configure provider credentials in `warp/apps/web/.env.local` instead of Studio settings.
+- Configure provider credentials in `vector/apps/web/.env.local` instead of Studio settings.
 - Example `.env.local` (already added):
   - `OPENROUTER_API_KEY=` (leave blank to use fallbacks)
   - `OPENROUTER_MODEL=moonshotai/kimi-k2:free`
@@ -964,7 +964,7 @@ Working now
 - Transport & Security:
   - The plugin does not send provider credentials; the backend reads `process.env`.
   - The plugin calls your backend at `http://127.0.0.1:3000` by default in dev.
-  - `.gitignore` excludes env files under `warp/apps/web` and the local `data/` folder.
+  - `.gitignore` excludes env files under `vector/apps/web` and the local `data/` folder.
 
 ---
 
@@ -1160,7 +1160,7 @@ The model never re‑reads the file tree unless fingerprints changed; it relies 
 
 # 20) Appendix O — Conversation Memory Architecture (Cline parity)
 
-This appendix documents how Vector/Warp maintains **chat memory** and **conversation state** so the AI always knows what happened last, across long sessions and restarts. It mirrors Cline’s approach (dual histories, persistence, truncation, auto‑compact summarization, and a persistent Memory Bank).
+This appendix documents how Vector maintains **chat memory** and **conversation state** so the AI always knows what happened last, across long sessions and restarts. It mirrors Cline’s approach (dual histories, persistence, truncation, auto‑compact summarization, and a persistent Memory Bank).
 
 ## O.1 Goals
 - Preserve **coherence** in a sequential, single‑threaded loop (one tool per message, one request at a time).
@@ -1259,9 +1259,9 @@ Each provider call includes:
 
 ## System Wiring Audit (Repo Snapshot)
 
-- Web Orchestrator: `warp/apps/web/lib/orchestrator/index.ts` maps tool calls → proposals and streams status via `/api/stream`.
-- Tool Schemas (web): `warp/apps/web/lib/tools/schemas.ts` defines these tools: `get_active_script`, `list_selection`, `list_open_documents`, `show_diff`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, `generate_asset_3d`.
-- Plugin Tools (Luau): `warp/plugin/src/tools/` implements: `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, plus extra read tools `get_properties`, `list_children`.
+- Web Orchestrator: `vector/apps/web/lib/orchestrator/index.ts` maps tool calls → proposals and streams status via `/api/stream`.
+- Tool Schemas (web): `vector/apps/web/lib/tools/schemas.ts` defines these tools: `get_active_script`, `list_selection`, `list_open_documents`, `show_diff`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, `generate_asset_3d`.
+- Plugin Tools (Luau): `vector/plugin/src/tools/` implements: `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, plus extra read tools `get_properties`, `list_children`.
 - API Routes (web):
   - `POST /api/chat` → orchestrator → proposals persisted (`lib/store/proposals.ts`) and workflow steps (`lib/store/workflows.ts`).
   - `GET /api/stream` → long‑poll streaming of orchestrator logs.
@@ -1297,7 +1297,7 @@ Optional next steps
 
 - Prereqs: Node 18+, Roblox Studio, Rojo (optional for syncing).
 - Backend (Next.js):
-  - `cd warp/apps/web && npm install`
+  - `cd vector/apps/web && npm install`
   - `npm run dev` (listens on `http://127.0.0.1:3000`)
   - Optional env:
     - `OPENROUTER_API_KEY` (if using provider)
@@ -1305,7 +1305,7 @@ Optional next steps
     - `VECTOR_USE_OPENROUTER=1` (forces provider use without plugin‑supplied key)
     - `CATALOG_API_URL` (real catalog search) and `CATALOG_API_KEY` (optional)
 - Plugin (Studio):
-  - Load the plugin source at `warp/plugin/src` (via Rojo or manual install).
+  - Load the plugin source at `vector/plugin/src` (via Rojo or manual install).
   - No Studio settings required. Start the backend (`npm run dev`) and configure `.env.local`.
   - Use the chat dock: send a prompt with an active script open. With no provider, fallbacks will propose a safe edit (insert comment), simple rename, or asset search.
 - Quick endpoint checks:
