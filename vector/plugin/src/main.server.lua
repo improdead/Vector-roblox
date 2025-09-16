@@ -5,6 +5,8 @@
 -- - Renders proposals with Approve/Reject
 -- - Applies simple edit insertions and rename_instance ops
 
+print("[Vector] starting")
+
 local Http = require(script.Parent.net.http)
 local HttpService = game:GetService("HttpService")
 local StudioService = game:GetService("StudioService")
@@ -18,6 +20,8 @@ local ToolSetProps = require(script.Parent.tools.set_properties)
 local ToolRename = require(script.Parent.tools.rename_instance)
 local ToolDelete = require(script.Parent.tools.delete_instance)
 local ToolApplyEdit = require(script.Parent.tools.apply_edit)
+
+print("[Vector] imported modules")
 
 local function getActiveScriptContext()
 	local s = StudioService.ActiveScript
@@ -470,6 +474,7 @@ local function insertAsset(assetId, parentPath)
 end
 
 local function buildUI(gui)
+    print("[Vector] building UI")
 	gui:ClearAllChildren()
 	gui.Title = "Vector"
 
@@ -1133,8 +1138,12 @@ local function sendChat(projectId, message, ctx, workflowId, opts)
     return resp
 end
 
+print("[Vector] creating toolbar")
+
 local toolbar = plugin:CreateToolbar("Vector")
 local toggleButton = toolbar:CreateButton("Vector", "Open Vector chat", "")
+
+print("[Vector] toolbar created")
 
 local activePollers = {}
 
