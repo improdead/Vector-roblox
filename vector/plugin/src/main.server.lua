@@ -718,7 +718,7 @@ local function buildUI(gui)
     local modelBtn = Instance.new("TextButton")
     modelBtn.AutoButtonColor = false
     modelBtn.Active = false
-    modelBtn.TextXAlignment = Enum.TextXAlignment.Left
+    --modelBtn.TextXAlignment = Enum.TextXAlignment.Left --commented out to prevent it from being left aligned
     -- Adjust for Auto(64) + Mode(84) + Send(28) + 3 gaps(8 each) = 192 + small buffer
     modelBtn.Size = UDim2.new(1, -196, 1, 0)
     modelBtn.Text = "grok-code-fast-1"
