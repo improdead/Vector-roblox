@@ -5,6 +5,8 @@
 -- - Renders proposals with Approve/Reject
 -- - Applies simple edit insertions and rename_instance ops
 
+print("[Vector] starting")
+
 local Http = require(script.Parent.net.http)
 local HttpService = game:GetService("HttpService")
 local StudioService = game:GetService("StudioService")
@@ -18,6 +20,8 @@ local ToolSetProps = require(script.Parent.tools.set_properties)
 local ToolRename = require(script.Parent.tools.rename_instance)
 local ToolDelete = require(script.Parent.tools.delete_instance)
 local ToolApplyEdit = require(script.Parent.tools.apply_edit)
+
+print("[Vector] imported modules")
 
 local function getActiveScriptContext()
 	local s = StudioService.ActiveScript
@@ -470,6 +474,7 @@ local function insertAsset(assetId, parentPath)
 end
 
 local function buildUI(gui)
+    print("[Vector] building UI")
 	gui:ClearAllChildren()
 	gui.Title = "Vector"
 
@@ -713,7 +718,7 @@ local function buildUI(gui)
     local modelBtn = Instance.new("TextButton")
     modelBtn.AutoButtonColor = false
     modelBtn.Active = false
-    modelBtn.TextXAlignment = Enum.TextXAlignment.Left
+    --modelBtn.TextXAlignment = Enum.TextXAlignment.Left --commented out to prevent it from being left aligned
     -- Adjust for Auto(64) + Mode(84) + Send(28) + 3 gaps(8 each) = 192 + small buffer
     modelBtn.Size = UDim2.new(1, -196, 1, 0)
     modelBtn.Text = "grok-code-fast-1"
@@ -1133,10 +1138,15 @@ local function sendChat(projectId, message, ctx, workflowId, opts)
     return resp
 end
 
+print("[Vector] creating toolbar")
+
 local toolbar = plugin:CreateToolbar("Vector")
 local toggleButton = toolbar:CreateButton("Vector", "Open Vector chat", "")
 
+print("[Vector] toolbar created")
+
 local activePollers = {}
+local gui = nil
 
 local function appendStatus(container, text)
     -- Reveal the status panel on first chunk
@@ -1198,160 +1208,172 @@ local function startStreamPoller(workflowId, statusContainer)
     end)
 end
 
-toggleButton.Click:Connect(function()
-	local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, true, false, 320, 520, 260, 360)
-	local gui = plugin:CreateDockWidgetPluginGui("VectorDock", info)
-	gui.Title = "Vector"
 
-	local ui = buildUI(gui)
-	-- Responsive: reflow when the dock is resized
-	pcall(function()
-		gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-			if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
-		end)
-		if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
-	end)
+local function toggleDock()
+    print("[Vector] toggleButton clicked")
+    
+    -- check if gui exists, if it does, toggle its visibility
+    if gui then
+        gui.Enabled = not gui.Enabled
+        return
+    end
 
-		local lastMessage = ""
-		local lastCtx = nil
-		local lastWorkflowId = nil
+    --otherwise, create a new one
+    -- should be Enum.InitialDockState.Right, true, true, 320, 520, 260, 360
+    local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, true, true, 320, 520, 260, 360)
+    print("[Vector] info", info)
+    gui = plugin:CreateDockWidgetPluginGui("VectorDock", info)
+    gui.Title = "Vector"
 
-        -- Auto helpers
-        local function autoApplyProposal(p)
-            if p.type == "edit" then
-                ui.addStatus("auto.apply edit → " .. (p.path or ""))
-                local ok, err = applyEditProposal(p)
-                ui.addStatus(ok and "auto.ok" or ("auto.err " .. tostring(err)))
-                reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
-                return ok
-            elseif p.type == "object_op" and p.ops then
-                local appliedAny = false
-                for _, op in ipairs(p.ops) do
-                    if op.op == "create_instance" then
-                        ui.addStatus("auto.create " .. tostring(op.className) .. " under " .. tostring(op.parentPath))
-                        local res = ToolCreate(op.className, op.parentPath, op.props)
-                        appliedAny = appliedAny or (res and res.ok == true)
-                        reportApply(p.id, { ok = res and res.ok == true, type = p.type, op = op.op, className = op.className, parentPath = op.parentPath, path = res and res.path, error = res and res.error })
-                    elseif op.op == "set_properties" then
-                        ui.addStatus("auto.set_properties → " .. tostring(op.path))
-                        local res = ToolSetProps(op.path, op.props)
-                        local ok = res and res.ok == true
-                        appliedAny = appliedAny or ok
-                        local infoOrErr = (res and res.errors and #res.errors > 0) and HttpService:JSONEncode(res.errors) or (res and res.error)
-                        reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, props = op.props, error = infoOrErr })
-                    elseif op.op == "rename_instance" then
-                        ui.addStatus("auto.rename → " .. tostring(op.path))
-                        local ok, infoOrErr = applyRenameOp(op)
-                        appliedAny = appliedAny or ok
-                        reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, newName = op.newName, error = infoOrErr })
-                    elseif op.op == "delete_instance" then
-                        ui.addStatus("auto.delete → " .. tostring(op.path))
-                        local res = ToolDelete(op.path)
-                        local ok = res and res.ok == true
-                        appliedAny = appliedAny or ok
-                        reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, error = res and res.error })
-                    end
+    local ui = buildUI(gui)
+    -- Responsive: reflow when the dock is resized
+    pcall(function()
+        gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+            if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
+        end)
+        if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
+    end)
+
+    local lastMessage = ""
+    local lastCtx = nil
+    local lastWorkflowId = nil
+
+    -- Auto helpers
+    local function autoApplyProposal(p)
+        if p.type == "edit" then
+            ui.addStatus("auto.apply edit → " .. (p.path or ""))
+            local ok, err = applyEditProposal(p)
+            ui.addStatus(ok and "auto.ok" or ("auto.err " .. tostring(err)))
+            reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
+            return ok
+        elseif p.type == "object_op" and p.ops then
+            local appliedAny = false
+            for _, op in ipairs(p.ops) do
+                if op.op == "create_instance" then
+                    ui.addStatus("auto.create " .. tostring(op.className) .. " under " .. tostring(op.parentPath))
+                    local res = ToolCreate(op.className, op.parentPath, op.props)
+                    appliedAny = appliedAny or (res and res.ok == true)
+                    reportApply(p.id, { ok = res and res.ok == true, type = p.type, op = op.op, className = op.className, parentPath = op.parentPath, path = res and res.path, error = res and res.error })
+                elseif op.op == "set_properties" then
+                    ui.addStatus("auto.set_properties → " .. tostring(op.path))
+                    local res = ToolSetProps(op.path, op.props)
+                    local ok = res and res.ok == true
+                    appliedAny = appliedAny or ok
+                    local infoOrErr = (res and res.errors and #res.errors > 0) and HttpService:JSONEncode(res.errors) or (res and res.error)
+                    reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, props = op.props, error = infoOrErr })
+                elseif op.op == "rename_instance" then
+                    ui.addStatus("auto.rename → " .. tostring(op.path))
+                    local ok, infoOrErr = applyRenameOp(op)
+                    appliedAny = appliedAny or ok
+                    reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, newName = op.newName, error = infoOrErr })
+                elseif op.op == "delete_instance" then
+                    ui.addStatus("auto.delete → " .. tostring(op.path))
+                    local res = ToolDelete(op.path)
+                    local ok = res and res.ok == true
+                    appliedAny = appliedAny or ok
+                    reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, error = res and res.error })
                 end
-                return appliedAny
-            elseif p.type == "asset_op" then
-                ui.addStatus("auto.asset_op (skipped—requires user choice)")
-                return false
             end
+            return appliedAny
+        elseif p.type == "asset_op" then
+            ui.addStatus("auto.asset_op (skipped—requires user choice)")
             return false
         end
+        return false
+    end
 
-        local function maybeAutoContinue(workflowId)
-            if not _G.__VECTOR_AUTO then return end
-            local maxSteps = 6
-            local steps = 0
-            task.spawn(function()
-                while _G.__VECTOR_AUTO and steps < maxSteps do
-                    steps += 1
-                    ui.addStatus("auto.next step " .. tostring(steps))
-                    local followup = "Next step: propose exactly one small, safe action."
-                    local mode = CURRENT_MODE
-                    local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = (mode == "ask") and true or nil, modelOverride = nil }
-                    local resp = sendChat("local", followup, { activeScript = getActiveScriptContext(), selection = getSelectionContext() }, workflowId, opts)
-                    if not resp.Success then ui.addStatus("auto.http " .. tostring(resp.StatusCode)); break end
-                    local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
-                    if not ok or parsed.error then ui.addStatus("auto.err invalid json"); break end
-                    renderProposals(ui.list, parsed.proposals or {})
-                    if parsed.workflowId then startStreamPoller(parsed.workflowId, ui.statusFrame) end
-                    local gotAny = false
-                    for _, p in ipairs(parsed.proposals or {}) do
-                        gotAny = true
-                        autoApplyProposal(p)
-                    end
-                    if not gotAny then break end
+    local function maybeAutoContinue(workflowId)
+        if not _G.__VECTOR_AUTO then return end
+        local maxSteps = 6
+        local steps = 0
+        task.spawn(function()
+            while _G.__VECTOR_AUTO and steps < maxSteps do
+                steps += 1
+                ui.addStatus("auto.next step " .. tostring(steps))
+                local followup = "Next step: propose exactly one small, safe action."
+                local mode = CURRENT_MODE
+                local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = (mode == "ask") and true or nil, modelOverride = nil }
+                local resp = sendChat("local", followup, { activeScript = getActiveScriptContext(), selection = getSelectionContext() }, workflowId, opts)
+                if not resp.Success then ui.addStatus("auto.http " .. tostring(resp.StatusCode)); break end
+                local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+                if not ok or parsed.error then ui.addStatus("auto.err invalid json"); break end
+                renderProposals(ui.list, parsed.proposals or {})
+                if parsed.workflowId then startStreamPoller(parsed.workflowId, ui.statusFrame) end
+                local gotAny = false
+                for _, p in ipairs(parsed.proposals or {}) do
+                    gotAny = true
+                    autoApplyProposal(p)
                 end
-                ui.addStatus("auto.done")
-            end)
+                if not gotAny then break end
+            end
+            ui.addStatus("auto.done")
+        end)
+    end
+
+    -- Extract send flow so both button and Enter key can trigger it
+    local function runSend()
+        local ctx = {
+            activeScript = getActiveScriptContext(),
+            selection = getSelectionContext(),
+        }
+        lastMessage = ui.textBox.Text
+        lastCtx = ctx
+        -- Reset status view (and hide until we receive chunks)
+        for _, child in ipairs(ui.statusFrame:GetChildren()) do if child:IsA("TextLabel") then child:Destroy() end end
+        ui.statusFrame.Visible = false
+        if ui.reflow then ui.reflow() end
+        local mode = CURRENT_MODE
+        local opts = {
+            mode = mode,
+            maxTurns = (mode == "ask") and 1 or nil,
+            enableFallbacks = (mode == "ask") and true or nil,
+            modelOverride = nil,
+        }
+        local resp = sendChat("local", ui.textBox.Text, ctx, nil, opts)
+        if not resp.Success then
+            local item = Instance.new("TextLabel")
+            item.Size = UDim2.new(1, -8, 0, 48)
+            item.TextWrapped = true
+            item.Text = "HTTP " .. tostring(resp.StatusCode) .. ": " .. (resp.Body or "")
+            item.BackgroundTransparency = 1
+            item.Parent = ui.list
+            return
         end
+        local ok, parsed = pcall(function()
+            return HttpService:JSONDecode(resp.Body)
+        end)
+        if not ok then
+            local item = Instance.new("TextLabel")
+            item.Size = UDim2.new(1, -8, 0, 24)
+            item.Text = "Invalid JSON from server"
+            item.BackgroundTransparency = 1
+            item.Parent = ui.list
+            return
+        end
+        if parsed.error then
+            local item = Instance.new("TextLabel")
+            item.Size = UDim2.new(1, -8, 0, 48)
+            item.TextWrapped = true
+            item.Text = "Error: " .. tostring(parsed.error)
+            item.BackgroundTransparency = 1
+            item.Parent = ui.list
+            return
+        end
+        renderProposals(ui.list, parsed.proposals or {})
+        if parsed.workflowId then
+            lastWorkflowId = parsed.workflowId
+            startStreamPoller(parsed.workflowId, ui.statusFrame)
+        end
+        if _G.__VECTOR_AUTO then
+            for _, p in ipairs(parsed.proposals or {}) do autoApplyProposal(p) end
+            if parsed.workflowId then maybeAutoContinue(parsed.workflowId) end
+        end
+    end
 
-	    -- Extract send flow so both button and Enter key can trigger it
-	    local function runSend()
-	        local ctx = {
-	            activeScript = getActiveScriptContext(),
-	            selection = getSelectionContext(),
-	        }
-	        lastMessage = ui.textBox.Text
-	        lastCtx = ctx
-	        -- Reset status view (and hide until we receive chunks)
-	        for _, child in ipairs(ui.statusFrame:GetChildren()) do if child:IsA("TextLabel") then child:Destroy() end end
-	        ui.statusFrame.Visible = false
-	        if ui.reflow then ui.reflow() end
-			local mode = CURRENT_MODE
-			local opts = {
-				mode = mode,
-				maxTurns = (mode == "ask") and 1 or nil,
-				enableFallbacks = (mode == "ask") and true or nil,
-				modelOverride = nil,
-			}
-			local resp = sendChat("local", ui.textBox.Text, ctx, nil, opts)
-	    if not resp.Success then
-	        local item = Instance.new("TextLabel")
-	        item.Size = UDim2.new(1, -8, 0, 48)
-	        item.TextWrapped = true
-	        item.Text = "HTTP " .. tostring(resp.StatusCode) .. ": " .. (resp.Body or "")
-	        item.BackgroundTransparency = 1
-	        item.Parent = ui.list
-	        return
-	    end
-	    local ok, parsed = pcall(function()
-	        return HttpService:JSONDecode(resp.Body)
-	    end)
-	    if not ok then
-	        local item = Instance.new("TextLabel")
-	        item.Size = UDim2.new(1, -8, 0, 24)
-	        item.Text = "Invalid JSON from server"
-	        item.BackgroundTransparency = 1
-	        item.Parent = ui.list
-	        return
-	    end
-	    if parsed.error then
-	        local item = Instance.new("TextLabel")
-	        item.Size = UDim2.new(1, -8, 0, 48)
-	        item.TextWrapped = true
-	        item.Text = "Error: " .. tostring(parsed.error)
-	        item.BackgroundTransparency = 1
-	        item.Parent = ui.list
-	        return
-	    end
-	    renderProposals(ui.list, parsed.proposals or {})
-	    if parsed.workflowId then
-	        lastWorkflowId = parsed.workflowId
-	        startStreamPoller(parsed.workflowId, ui.statusFrame)
-	    end
-	    if _G.__VECTOR_AUTO then
-	        for _, p in ipairs(parsed.proposals or {}) do autoApplyProposal(p) end
-	        if parsed.workflowId then maybeAutoContinue(parsed.workflowId) end
-	    end
-		end
+    ui.sendBtn.MouseButton1Click:Connect(runSend)
 
-	    ui.sendBtn.MouseButton1Click:Connect(runSend)
-
-	    -- Enter-to-Send: Enter sends, Shift+Enter inserts newline
-	    local enterConn: RBXScriptConnection? = nil
+    -- Enter-to-Send: Enter sends, Shift+Enter inserts newline
+    local enterConn: RBXScriptConnection? = nil
     ui.textBox.Focused:Connect(function()
         if enterConn then enterConn:Disconnect() end
         -- Bind directly to the TextBox to ensure we see Return even when Roblox marks it as game-processed
@@ -1421,6 +1443,8 @@ toggleButton.Click:Connect(function()
             startStreamPoller(parsed.workflowId, ui.statusFrame)
         end
     end)
-end)
+end
+
+toggleButton.Click:Connect(toggleDock)
 
 return {}

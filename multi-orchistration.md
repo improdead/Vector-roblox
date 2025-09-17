@@ -12,7 +12,7 @@ This document specifies the multi‑turn orchestration flow used by Vector to dr
 
 ## Current Implementation
 
-- Location: `warp/apps/web/lib/orchestrator/index.ts`
+- Location: `vector/apps/web/lib/orchestrator/index.ts`
 - Entry: `runLLM(input)`
 - Provider: OpenRouter‑compatible Chat Completions via `providers/openrouter.ts`
 - System prompt lists both context and action tools and enforces “one tool per message”.
@@ -39,7 +39,7 @@ Note: `context.activeScript` is optional. When Studio has no open script, the pr
 
 ### Validation & Mapping
 
-- Tool schemas in `warp/apps/web/lib/tools/schemas.ts` (Zod) validate inputs strictly.
+- Tool schemas in `vector/apps/web/lib/tools/schemas.ts` (Zod) validate inputs strictly.
 - Mapping produces one of:
   - `edit` proposals (rangeEDITS)
   - `object_op` proposals (instance operations)
@@ -140,7 +140,7 @@ Node & npm: Node 18+ installed.
 Run backend locally:
 
 
-cd warp/apps/web && npm i && npm run dev (served at http://127.0.0.1:3000).
+cd vector/apps/web && npm i && npm run dev (served at http://127.0.0.1:3000).
 
 
 Create .env.local:
