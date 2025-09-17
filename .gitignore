@@ -3,9 +3,9 @@ node_modules/
 .next/
 
 # Env files
-warp/apps/web/.env
-warp/apps/web/.env.local
-warp/apps/web/.env.*
+vector/apps/web/.env
+vector/apps/web/.env.local
+vector/apps/web/.env.*
 
 # Local data store
 data/
