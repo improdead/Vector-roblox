@@ -129,14 +129,14 @@ return function(args)
     end
 
     local ok, err = pcall(function()
-        ScriptEditorService:UpdateSourceAsync(target, function(old)
+        local function applyWith(old)
             -- Conflict check at call time to avoid require-order issues
             local sha1 = rawget(_G, "__VECTOR_SHA1")
             if beforeHash and type(sha1) == "function" then
                 local h = sha1(old)
                 if h ~= beforeHash then
                     conflict = true
-                    return old
+                    return old, false
                 end
             end
 
@@ -149,11 +149,27 @@ return function(args)
 
             if newText ~= old then
                 changed = true
-                return newText
+                return newText, true
             else
-                return old
+                return old, false
             end
+        end
+
+        -- Prefer UpdateSourceAsync if available
+        local okAsync = pcall(function()
+            ScriptEditorService:UpdateSourceAsync(target, function(old)
+                local text, didChange = applyWith(old)
+                return text
+            end)
         end)
+        if not okAsync then
+            -- Fallback: GetEditorSource + SetEditorSource for older Studio versions
+            local old = ScriptEditorService:GetEditorSource(target)
+            local newText, didChange = applyWith(old)
+            if didChange then
+                ScriptEditorService:SetEditorSource(target, newText)
+            end
+        end
     end)
 
     ChangeHistoryService:FinishRecording("AI Edit")

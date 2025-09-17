@@ -70,7 +70,7 @@ Encoding for parameters
 - Objects/arrays: INNER TEXT MUST be strict JSON (double quotes; no trailing commas). Never wrap JSON in quotes. Never add code fences.
   ✅ <props>{"Name":"Grid","Anchored":true}</props>
   ❌ <props>"{ \"Name\": \"Grid\" }"</props>
-  ❌ <props>```json{\n  \"Name\": \"Grid\"\n}```</props>
+  ❌ <props>\`\`\`json{ \"Name\": \"Grid\" }\`\`\`</props>
   ❌ <props>{ Name: "Grid", }</props>
 - If a parameter is optional and unknown, omit the tag entirely (do NOT write "null" or "undefined").
 
@@ -287,7 +287,8 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
     }
   }
   if (name === 'delete_instance') {
-    const path = ensurePath(selPath)
+    // Use selection-derived defaults when available
+    const path = ensurePath(input.context.selection && input.context.selection.length === 1 ? input.context.selection[0].path : undefined)
     if (path) {
       // Guard: avoid destructive deletes at DataModel or Services level
       if (/^game(\.[A-Za-z]+Service|\.DataModel)?$/.test(path)) return proposals
@@ -532,7 +533,7 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   // Fallbacks: safe, deterministic proposals without provider parsing
   const fallbacksEnabled = typeof (input as any).enableFallbacks === 'boolean'
     ? (input as any).enableFallbacks
-    : (process.env.VECTOR_DISABLE_FALLBACKS || '1') !== '1'
+    : (process.env.VECTOR_DISABLE_FALLBACKS || '0') !== '1'
   const fallbacksDisabled = !fallbacksEnabled
   if (!fallbacksDisabled && input.context.activeScript) {
     const path = input.context.activeScript.path

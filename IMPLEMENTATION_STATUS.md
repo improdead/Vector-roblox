@@ -12,6 +12,13 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 ## Recent Updates
 
+- Code quality fixes (September 2025):
+  - `vector/plugin/src/main.server.lua` declares `CURRENT_MODE` at file scope and avoids duplicate local state.
+  - `vector/plugin/src/main.server.lua` reads the `vector_backend_base_url` plugin setting before falling back to localhost.
+  - `vector/plugin/src/main.server.lua` cleans up the `InsertService:LoadAsset()` container after parenting the inserted model.
+  - `vector/plugin/src/tools/apply_edit.lua` falls back to `ScriptEditorService:SetEditorSource()` when `UpdateSourceAsync` is unavailable.
+  - This document now reflects the above plugin orchestration changes.
+
 - Added detailed logging across orchestrator and API routes (see Vector.md “Logging & Observability”).
 - Relaxed chat input schema: `context.activeScript` is now optional (was required `object|null`). This avoids HTTP 400 when no script is open in Studio; the provider can request context via tools when needed.
 - Studio plugin UI: status panel is hidden until the first planning/status line arrives (prevents an empty black block under the composer). Composer now auto-sizes vertically and reflows the layout.
@@ -108,7 +115,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - Scene queries: `list_children`, `get_properties` (implemented)
       - `vector/plugin/src/tools/list_children.lua:1`
       - `vector/plugin/src/tools/get_properties.lua:1`
-    - Editing/object ops: `apply_edit` (minimal), `create_instance`, `set_properties`, `rename_instance`, `delete_instance` (ChangeHistory wrapped)
+    - Editing/object ops: `apply_edit` (enhanced with ScriptEditorService fallbacks), `create_instance`, `set_properties`, `rename_instance`, `delete_instance` (ChangeHistory wrapped)
       - `vector/plugin/src/tools/apply_edit.lua:1`
       - `vector/plugin/src/tools/create_instance.lua:1`
       - `vector/plugin/src/tools/set_properties.lua:1`

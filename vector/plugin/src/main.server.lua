@@ -15,6 +15,7 @@ local Selection = game:GetService("Selection")
 local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local InsertService = game:GetService("InsertService")
 local UserInputService = game:GetService("UserInputService")
+local ServerStorage = game:GetService("ServerStorage")
 local ToolCreate = require(script.Parent.tools.create_instance)
 local ToolSetProps = require(script.Parent.tools.set_properties)
 local ToolRename = require(script.Parent.tools.rename_instance)
@@ -22,6 +23,9 @@ local ToolDelete = require(script.Parent.tools.delete_instance)
 local ToolApplyEdit = require(script.Parent.tools.apply_edit)
 
 print("[Vector] imported modules")
+
+-- UI state (shared across UI and actions)
+local CURRENT_MODE = "agent" -- or "ask"
 
 local function getActiveScriptContext()
 	local s = StudioService.ActiveScript
@@ -46,6 +50,58 @@ local function getSelectionContext()
 		})
 	end
 	return out
+end
+
+local function requestScriptPermission()
+    if _G.__VECTOR_PERMISSION_OK then
+        return true
+    end
+
+    local probe = Instance.new("Script")
+    probe.Name = "__VectorPermissionProbe"
+    probe.Source = "-- Vector permission probe"
+    probe.Parent = ServerStorage
+
+    if not ChangeHistoryService:TryBeginRecording("Vector Permission Probe", "Vector Permission Probe") then
+        probe:Destroy()
+        return false, "ChangeHistoryService denied recording"
+    end
+
+    local ok, err = pcall(function()
+        if ScriptEditorService.UpdateSourceAsync then
+            ScriptEditorService:UpdateSourceAsync(probe, function(old)
+                return "-- Vector permission probe\n" .. (old or "")
+            end)
+        else
+            local newText = "-- Vector permission probe\n" .. (probe.Source or "")
+            ScriptEditorService:SetEditorSource(probe, newText)
+        end
+    end)
+
+    ChangeHistoryService:FinishRecording("Vector Permission Probe")
+    probe:Destroy()
+
+    if ok then
+        _G.__VECTOR_PERMISSION_OK = true
+        return true
+    else
+        return false, tostring(err)
+    end
+end
+
+local function ensurePermissionWithStatus()
+    if _G.__VECTOR_PERMISSION_OK then
+        return true
+    end
+    local ok, err = requestScriptPermission()
+    local ui = _G.__VECTOR_UI
+    if ok then
+        if ui and ui.addStatus then ui.addStatus("permission.ok script modification granted") end
+        return true
+    else
+        if ui and ui.addStatus then ui.addStatus("permission.err " .. tostring(err or "failed")) end
+        return false
+    end
 end
 
 local function resolveByFullName(path)
@@ -370,6 +426,7 @@ local function renderUnifiedDiff(container, oldText, newText)
 end
 
 local function applyEditProposal(proposal)
+    ensurePermissionWithStatus()
 	local inst = resolveByFullName(proposal.path)
 	if not inst then
 		return false, "Instance not found: " .. tostring(proposal.path)
@@ -402,7 +459,14 @@ local function openScriptByPath(path)
 end
 
 local function getBackendBaseUrl()
-    -- Settings removed: use local backend for dev; deploy can hardcode env.
+    -- Prefer plugin setting if present, fallback to local dev server
+    local val
+    pcall(function()
+        if plugin and plugin.GetSetting then val = plugin:GetSetting("vector_backend_base_url") end
+    end)
+    if typeof(val) == "string" and #val > 0 then
+        return (string.sub(val, -1) == "/") and string.sub(val, 1, -2) or val
+    end
     return "http://127.0.0.1:3000"
 end
 
@@ -461,10 +525,11 @@ local function insertAsset(assetId, parentPath)
 	end
 	local ok, modelOrErr = pcall(function()
 		local container = InsertService:LoadAsset(assetId)
-		local model = container
-		local childModel = container and container:FindFirstChildOfClass("Model")
-		if childModel then model = childModel end
+		if not container then error("LoadAsset returned nil") end
+		local model = container:FindFirstChildOfClass("Model") or container
 		model.Parent = parent
+		-- If the container is different from the inserted model, clean it up
+		if container ~= model then pcall(function() container:Destroy() end) end
 		return model
 	end)
 	if not ok then
@@ -1073,6 +1138,7 @@ local function renderProposals(list, proposals)
 				if not ok then snippet.Text = tostring(err) end
 				reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
 			elseif p.type == "object_op" and p.ops then
+				ensurePermissionWithStatus()
 				local appliedAny = false
 				local lastErr
 				for _, op in ipairs(p.ops) do
@@ -1117,9 +1183,6 @@ local function renderProposals(list, proposals)
 	end
 	list.CanvasSize = UDim2.new(0, 0, 0, list.UIListLayout.AbsoluteContentSize.Y + 16)
 end
-
--- In-memory UI state (since settings were removed)
-local CURRENT_MODE = "agent" -- or "ask"
 
 local function sendChat(projectId, message, ctx, workflowId, opts)
     local base = getBackendBaseUrl()
@@ -1210,239 +1273,239 @@ end
 
 
 local function toggleDock()
-    print("[Vector] toggleButton clicked")
-    
-    -- check if gui exists, if it does, toggle its visibility
-    if gui then
-        gui.Enabled = not gui.Enabled
-        return
-    end
+	print("[Vector] toggleButton clicked")
+	
+	-- check if gui exists, if it does, toggle its visibility
+	if gui then
+		gui.Enabled = not gui.Enabled
+		return
+	end
 
-    --otherwise, create a new one
-    -- should be Enum.InitialDockState.Right, true, true, 320, 520, 260, 360
-    local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, true, true, 320, 520, 260, 360)
-    print("[Vector] info", info)
-    gui = plugin:CreateDockWidgetPluginGui("VectorDock", info)
-    gui.Title = "Vector"
+	--otherwise, create a new one
+	-- should be Enum.InitialDockState.Right, true, true, 320, 520, 260, 360
+	local info = DockWidgetPluginGuiInfo.new(Enum.InitialDockState.Right, true, true, 320, 520, 260, 360)
+	print("[Vector] info", info)
+	gui = plugin:CreateDockWidgetPluginGui("VectorDock", info)
+	gui.Title = "Vector"
 
-    local ui = buildUI(gui)
-    -- Responsive: reflow when the dock is resized
-    pcall(function()
-        gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
-            if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
-        end)
-        if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
-    end)
+	local ui = buildUI(gui)
+	-- Responsive: reflow when the dock is resized
+	pcall(function()
+		gui:GetPropertyChangedSignal("AbsoluteSize"):Connect(function()
+			if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
+		end)
+		if ui and ui.applyResponsive then ui.applyResponsive(gui.AbsoluteSize.X) end
+	end)
 
-    local lastMessage = ""
-    local lastCtx = nil
-    local lastWorkflowId = nil
+	task.defer(function()
+		ensurePermissionWithStatus()
+	end)
 
-    -- Auto helpers
-    local function autoApplyProposal(p)
-        if p.type == "edit" then
-            ui.addStatus("auto.apply edit → " .. (p.path or ""))
-            local ok, err = applyEditProposal(p)
-            ui.addStatus(ok and "auto.ok" or ("auto.err " .. tostring(err)))
-            reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
-            return ok
-        elseif p.type == "object_op" and p.ops then
-            local appliedAny = false
-            for _, op in ipairs(p.ops) do
-                if op.op == "create_instance" then
-                    ui.addStatus("auto.create " .. tostring(op.className) .. " under " .. tostring(op.parentPath))
-                    local res = ToolCreate(op.className, op.parentPath, op.props)
-                    appliedAny = appliedAny or (res and res.ok == true)
-                    reportApply(p.id, { ok = res and res.ok == true, type = p.type, op = op.op, className = op.className, parentPath = op.parentPath, path = res and res.path, error = res and res.error })
-                elseif op.op == "set_properties" then
-                    ui.addStatus("auto.set_properties → " .. tostring(op.path))
-                    local res = ToolSetProps(op.path, op.props)
-                    local ok = res and res.ok == true
-                    appliedAny = appliedAny or ok
-                    local infoOrErr = (res and res.errors and #res.errors > 0) and HttpService:JSONEncode(res.errors) or (res and res.error)
-                    reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, props = op.props, error = infoOrErr })
-                elseif op.op == "rename_instance" then
-                    ui.addStatus("auto.rename → " .. tostring(op.path))
-                    local ok, infoOrErr = applyRenameOp(op)
-                    appliedAny = appliedAny or ok
-                    reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, newName = op.newName, error = infoOrErr })
-                elseif op.op == "delete_instance" then
-                    ui.addStatus("auto.delete → " .. tostring(op.path))
-                    local res = ToolDelete(op.path)
-                    local ok = res and res.ok == true
-                    appliedAny = appliedAny or ok
-                    reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, error = res and res.error })
-                end
-            end
-            return appliedAny
-        elseif p.type == "asset_op" then
-            ui.addStatus("auto.asset_op (skipped—requires user choice)")
-            return false
-        end
-        return false
-    end
+	local lastMessage = ""
+	local lastCtx = nil
+	local lastWorkflowId = nil
 
-    local function maybeAutoContinue(workflowId)
-        if not _G.__VECTOR_AUTO then return end
-        local maxSteps = 6
-        local steps = 0
-        task.spawn(function()
-            while _G.__VECTOR_AUTO and steps < maxSteps do
-                steps += 1
-                ui.addStatus("auto.next step " .. tostring(steps))
-                local followup = "Next step: propose exactly one small, safe action."
-                local mode = CURRENT_MODE
-                local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = (mode == "ask") and true or nil, modelOverride = nil }
-                local resp = sendChat("local", followup, { activeScript = getActiveScriptContext(), selection = getSelectionContext() }, workflowId, opts)
-                if not resp.Success then ui.addStatus("auto.http " .. tostring(resp.StatusCode)); break end
-                local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
-                if not ok or parsed.error then ui.addStatus("auto.err invalid json"); break end
-                renderProposals(ui.list, parsed.proposals or {})
-                if parsed.workflowId then startStreamPoller(parsed.workflowId, ui.statusFrame) end
-                local gotAny = false
-                for _, p in ipairs(parsed.proposals or {}) do
-                    gotAny = true
-                    autoApplyProposal(p)
-                end
-                if not gotAny then break end
-            end
-            ui.addStatus("auto.done")
-        end)
-    end
+	-- Auto helpers
+	local function autoApplyProposal(p)
+		if p.type == "edit" then
+			ui.addStatus("auto.apply edit → " .. (p.path or ""))
+			ensurePermissionWithStatus()
+			local ok, err = applyEditProposal(p)
+			ui.addStatus(ok and "auto.ok" or ("auto.err " .. tostring(err)))
+			reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
+			return ok
+		elseif p.type == "object_op" and p.ops then
+			ensurePermissionWithStatus()
+			local appliedAny = false
+			for _, op in ipairs(p.ops) do
+				if op.op == "create_instance" then
+					ui.addStatus("auto.create " .. tostring(op.className) .. " under " .. tostring(op.parentPath))
+					local res = ToolCreate(op.className, op.parentPath, op.props)
+					appliedAny = appliedAny or (res and res.ok == true)
+					reportApply(p.id, { ok = res and res.ok == true, type = p.type, op = op.op, className = op.className, parentPath = op.parentPath, path = res and res.path, error = res and res.error })
+				elseif op.op == "set_properties" then
+					ui.addStatus("auto.set_properties → " .. tostring(op.path))
+					local res = ToolSetProps(op.path, op.props)
+					local ok = res and res.ok == true
+					appliedAny = appliedAny or ok
+					local infoOrErr = (res and res.errors and #res.errors > 0) and HttpService:JSONEncode(res.errors) or (res and res.error)
+					reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, props = op.props, error = infoOrErr })
+				elseif op.op == "rename_instance" then
+					ui.addStatus("auto.rename → " .. tostring(op.path))
+					local ok, infoOrErr = applyRenameOp(op)
+					appliedAny = appliedAny or ok
+					reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, newName = op.newName, error = infoOrErr })
+				elseif op.op == "delete_instance" then
+					ui.addStatus("auto.delete → " .. tostring(op.path))
+					local res = ToolDelete(op.path)
+					local ok = res and res.ok == true
+					appliedAny = appliedAny or ok
+					reportApply(p.id, { ok = ok, type = p.type, op = op.op, path = op.path, error = res and res.error })
+				end
+			end
+			return appliedAny
+		elseif p.type == "asset_op" then
+			ui.addStatus("auto.asset_op (skipped—requires user choice)")
+			return false
+		end
+		return false
+	end
 
-    -- Extract send flow so both button and Enter key can trigger it
-    local function runSend()
-        local ctx = {
-            activeScript = getActiveScriptContext(),
-            selection = getSelectionContext(),
-        }
-        lastMessage = ui.textBox.Text
-        lastCtx = ctx
-        -- Reset status view (and hide until we receive chunks)
-        for _, child in ipairs(ui.statusFrame:GetChildren()) do if child:IsA("TextLabel") then child:Destroy() end end
-        ui.statusFrame.Visible = false
-        if ui.reflow then ui.reflow() end
-        local mode = CURRENT_MODE
-        local opts = {
-            mode = mode,
-            maxTurns = (mode == "ask") and 1 or nil,
-            enableFallbacks = (mode == "ask") and true or nil,
-            modelOverride = nil,
-        }
-        local resp = sendChat("local", ui.textBox.Text, ctx, nil, opts)
-        if not resp.Success then
-            local item = Instance.new("TextLabel")
-            item.Size = UDim2.new(1, -8, 0, 48)
-            item.TextWrapped = true
-            item.Text = "HTTP " .. tostring(resp.StatusCode) .. ": " .. (resp.Body or "")
-            item.BackgroundTransparency = 1
-            item.Parent = ui.list
-            return
-        end
-        local ok, parsed = pcall(function()
-            return HttpService:JSONDecode(resp.Body)
-        end)
-        if not ok then
-            local item = Instance.new("TextLabel")
-            item.Size = UDim2.new(1, -8, 0, 24)
-            item.Text = "Invalid JSON from server"
-            item.BackgroundTransparency = 1
-            item.Parent = ui.list
-            return
-        end
-        if parsed.error then
-            local item = Instance.new("TextLabel")
-            item.Size = UDim2.new(1, -8, 0, 48)
-            item.TextWrapped = true
-            item.Text = "Error: " .. tostring(parsed.error)
-            item.BackgroundTransparency = 1
-            item.Parent = ui.list
-            return
-        end
-        renderProposals(ui.list, parsed.proposals or {})
-        if parsed.workflowId then
-            lastWorkflowId = parsed.workflowId
-            startStreamPoller(parsed.workflowId, ui.statusFrame)
-        end
-        if _G.__VECTOR_AUTO then
-            for _, p in ipairs(parsed.proposals or {}) do autoApplyProposal(p) end
-            if parsed.workflowId then maybeAutoContinue(parsed.workflowId) end
-        end
-    end
+	local function maybeAutoContinue(workflowId)
+		if not _G.__VECTOR_AUTO then return end
+		local maxSteps = 6
+		local steps = 0
+		task.spawn(function()
+			while _G.__VECTOR_AUTO and steps < maxSteps do
+				steps += 1
+				ui.addStatus("auto.next step " .. tostring(steps))
+				local followup = "Next step: propose exactly one small, safe action."
+				local mode = CURRENT_MODE
+				local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = nil }
+				local resp = sendChat("local", followup, { activeScript = getActiveScriptContext(), selection = getSelectionContext() }, workflowId, opts)
+				if not resp.Success then ui.addStatus("auto.http " .. tostring(resp.StatusCode)); break end
+				local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+				if not ok or parsed.error then ui.addStatus("auto.err invalid json"); break end
+				renderProposals(ui.list, parsed.proposals or {})
+				if parsed.workflowId then startStreamPoller(parsed.workflowId, ui.statusFrame) end
+				local gotAny = false
+				for _, proposal in ipairs(parsed.proposals or {}) do
+					gotAny = true
+					autoApplyProposal(proposal)
+				end
+				if not gotAny then break end
+			end
+			ui.addStatus("auto.done")
+		end)
+	end
 
-    ui.sendBtn.MouseButton1Click:Connect(runSend)
+	-- Extract send flow so both button and Enter key can trigger it
+	local function runSend()
+		-- echo user message in the plan/status area (Cursor-like transcript)
+		ui.addStatus("You: " .. tostring(ui.textBox.Text))
+		local ctx = {
+			activeScript = getActiveScriptContext(),
+			selection = getSelectionContext(),
+		}
+		lastMessage = ui.textBox.Text
+		lastCtx = ctx
+		-- Reset status view (and hide until we receive chunks)
+		for _, child in ipairs(ui.statusFrame:GetChildren()) do
+			if child:IsA("TextLabel") then child:Destroy() end
+		end
+		ui.statusFrame.Visible = false
+		if ui.reflow then ui.reflow() end
+		local mode = CURRENT_MODE
+		local opts = {
+			mode = mode,
+			maxTurns = (mode == "ask") and 1 or nil,
+			enableFallbacks = true,
+			modelOverride = nil,
+		}
+		local resp = sendChat("local", ui.textBox.Text, ctx, nil, opts)
+		if not resp.Success then
+			local item = Instance.new("TextLabel")
+			item.Size = UDim2.new(1, -8, 0, 48)
+			item.TextWrapped = true
+			item.Text = "HTTP " .. tostring(resp.StatusCode) .. ": " .. (resp.Body or "")
+			item.BackgroundTransparency = 1
+			item.Parent = ui.list
+			return
+		end
+		local ok, parsed = pcall(function()
+			return HttpService:JSONDecode(resp.Body)
+		end)
+		if not ok then
+			local item = Instance.new("TextLabel")
+			item.Size = UDim2.new(1, -8, 0, 24)
+			item.Text = "Invalid JSON from server"
+			item.BackgroundTransparency = 1
+			item.Parent = ui.list
+			return
+		end
+		if parsed.error then
+			local item = Instance.new("TextLabel")
+			item.Size = UDim2.new(1, -8, 0, 48)
+			item.TextWrapped = true
+			item.Text = "Error: " .. tostring(parsed.error)
+			item.BackgroundTransparency = 1
+			item.Parent = ui.list
+			return
+		end
+		renderProposals(ui.list, parsed.proposals or {})
+		if parsed.workflowId then
+			lastWorkflowId = parsed.workflowId
+			startStreamPoller(parsed.workflowId, ui.statusFrame)
+		end
+		if _G.__VECTOR_AUTO then
+			for _, proposal in ipairs(parsed.proposals or {}) do autoApplyProposal(proposal) end
+			if parsed.workflowId then maybeAutoContinue(parsed.workflowId) end
+		end
+	end
 
-    -- Enter-to-Send: Enter sends, Shift+Enter inserts newline
-    local enterConn: RBXScriptConnection? = nil
-    ui.textBox.Focused:Connect(function()
-        if enterConn then enterConn:Disconnect() end
-        -- Bind directly to the TextBox to ensure we see Return even when Roblox marks it as game-processed
-        enterConn = ui.textBox.InputBegan:Connect(function(input)
-            if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Return then
-                local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
-                if not shift then
-                    runSend()
-                    -- Trim a trailing newline if the TextBox inserted one
-                    ui.textBox.Text = string.gsub(ui.textBox.Text, "\r?\n$", "")
-                end
-            end
-        end)
-    end)
-    ui.textBox.FocusLost:Connect(function(enterPressed)
-        if enterPressed then
-            -- Some Studio versions report enterPressed even for multi-line; treat as send
-            runSend()
-            ui.textBox.Text = string.gsub(ui.textBox.Text, "\r?\n$", "")
-        end
-        if enterConn then enterConn:Disconnect(); enterConn = nil end
-    end)
+	ui.sendBtn.MouseButton1Click:Connect(runSend)
 
-    ui.retryBtn.MouseButton1Click:Connect(function()
-        if lastMessage == "" then return end
-        -- Re-run same prompt as a new workflow
-        ui.sendBtn.Text = "Sending…"; ui.sendBtn.AutoButtonColor = false
-        local mode = CURRENT_MODE
-        local opts = {
-            mode = mode,
-            maxTurns = (mode == "ask") and 1 or nil,
-            enableFallbacks = (mode == "ask") and true or nil,
-            modelOverride = nil,
-        }
-        local resp = sendChat("local", lastMessage, lastCtx, nil, opts)
-        ui.sendBtn.Text = "Send"; ui.sendBtn.AutoButtonColor = true
-        if not resp.Success then return end
-        local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
-        if not ok or parsed.error then return end
-        renderProposals(ui.list, parsed.proposals or {})
-        if parsed.workflowId then
-            lastWorkflowId = parsed.workflowId
-            startStreamPoller(parsed.workflowId, ui.statusFrame)
-        end
-    end)
+	-- Enter-to-Send: Enter sends, Shift+Enter inserts newline
+	local enterConn: RBXScriptConnection? = nil
+	ui.textBox.Focused:Connect(function()
+		if enterConn then enterConn:Disconnect() end
+		-- Bind directly to the TextBox to ensure we see Return even when Roblox marks it as game-processed
+		enterConn = ui.textBox.InputBegan:Connect(function(input)
+			if input.UserInputType == Enum.UserInputType.Keyboard and input.KeyCode == Enum.KeyCode.Return then
+				local shift = UserInputService:IsKeyDown(Enum.KeyCode.LeftShift) or UserInputService:IsKeyDown(Enum.KeyCode.RightShift)
+				if not shift then
+					runSend()
+					-- Trim a trailing newline if the TextBox inserted one
+					ui.textBox.Text = string.gsub(ui.textBox.Text, "\r?\n$", "")
+				end
+			end
+		end)
+	end)
+	ui.textBox.FocusLost:Connect(function(enterPressed)
+		if enterPressed then
+			-- Some Studio versions report enterPressed even for multi-line; treat as send
+			runSend()
+			ui.textBox.Text = string.gsub(ui.textBox.Text, "\r?\n$", "")
+		end
+		if enterConn then enterConn:Disconnect(); enterConn = nil end
+	end)
 
-    ui.nextBtn.MouseButton1Click:Connect(function()
-        if not lastWorkflowId then return end
-        -- Ask the backend to continue with the next atomic step on the same workflow
-        local followup = "Next step: propose exactly one small, safe action."
-        local mode = CURRENT_MODE
-        local opts = {
-            mode = mode,
-            maxTurns = (mode == "ask") and 1 or nil,
-            enableFallbacks = (mode == "ask") and true or nil,
-            modelOverride = nil,
-        }
-        local resp = sendChat("local", followup, {
-            activeScript = getActiveScriptContext(),
-            selection = getSelectionContext(),
-        }, lastWorkflowId, opts)
-        if not resp.Success then return end
-        local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
-        if not ok or parsed.error then return end
-        renderProposals(ui.list, parsed.proposals or {})
-        if parsed.workflowId then
-            startStreamPoller(parsed.workflowId, ui.statusFrame)
-        end
-    end)
+	ui.retryBtn.MouseButton1Click:Connect(function()
+		if lastMessage == "" then return end
+		-- Re-run same prompt as a new workflow
+		ui.sendBtn.Text = "Sending…"; ui.sendBtn.AutoButtonColor = false
+		local mode = CURRENT_MODE
+		local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = nil }
+		local resp = sendChat("local", lastMessage, lastCtx, nil, opts)
+		ui.sendBtn.Text = "Send"; ui.sendBtn.AutoButtonColor = true
+		if not resp.Success then return end
+		local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+		if not ok or parsed.error then return end
+		renderProposals(ui.list, parsed.proposals or {})
+		if parsed.workflowId then
+			lastWorkflowId = parsed.workflowId
+			startStreamPoller(parsed.workflowId, ui.statusFrame)
+		end
+	end)
+
+	ui.nextBtn.MouseButton1Click:Connect(function()
+		if not lastWorkflowId then return end
+		-- Ask the backend to continue with the next atomic step on the same workflow
+		local followup = "Next step: propose exactly one small, safe action."
+		local mode = CURRENT_MODE
+		local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = nil }
+		local resp = sendChat("local", followup, {
+			activeScript = getActiveScriptContext(),
+			selection = getSelectionContext(),
+		}, lastWorkflowId, opts)
+		if not resp.Success then return end
+		local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+		if not ok or parsed.error then return end
+		renderProposals(ui.list, parsed.proposals or {})
+		if parsed.workflowId then
+			startStreamPoller(parsed.workflowId, ui.statusFrame)
+		end
+	end)
 end
 
 toggleButton.Click:Connect(toggleDock)
