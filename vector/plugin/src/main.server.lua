@@ -1212,29 +1212,65 @@ local function buildUI(gui)
     local tooltipTweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
     local showTween, hideTween
     local isTooltipVisible = false
+    local hideConnection = nil
+    
+    -- Helper function to position tooltip within viewport
+    local function positionTooltipWithinViewport()
+        local buttonPos = autoToggleBtn.AbsolutePosition
+        local buttonSize = autoToggleBtn.AbsoluteSize
+        
+        -- Get viewport size (accounting for DPI scaling)
+        local viewportSize = workspace.CurrentCamera.ViewportSize
+        local uiScale = game:GetService("GuiService"):GetGuiInset()
+        
+        -- Tooltip dimensions
+        local tooltipWidth = 80
+        local tooltipHeight = 24
+        local spacing = 8
+        
+        -- Calculate desired position (above button, centered)
+        local desiredX = buttonPos.X + (buttonSize.X / 2) - (tooltipWidth / 2)
+        local desiredY = buttonPos.Y - tooltipHeight - spacing
+        
+        -- Clamp X position within viewport bounds
+        local clampedX = math.max(uiScale.X, math.min(desiredX, viewportSize.X - tooltipWidth - uiScale.X))
+        
+        -- If tooltip would go above viewport, position below button instead
+        local clampedY = desiredY
+        if clampedY < uiScale.Y then
+            clampedY = buttonPos.Y + buttonSize.Y + spacing
+        end
+        
+        return UDim2.new(0, clampedX, 0, clampedY)
+    end
+    
+    -- Clean up tween connections
+    local function cleanupTweens()
+        if showTween then 
+            showTween:Cancel()
+            showTween = nil
+        end
+        if hideTween then 
+            hideTween:Cancel()
+            hideTween = nil
+        end
+        if hideConnection then
+            hideConnection:Disconnect()
+            hideConnection = nil
+        end
+    end
     
     autoToggleBtn.MouseEnter:Connect(function()
         -- Set initial transparent state for animation
         autoToggleBtnTooltip.BackgroundTransparency = 1
         autoToggleBtnTooltip.TextTransparency = 1
         
-        -- Position tooltip above the button
-        local buttonPos = autoToggleBtn.AbsolutePosition
-        local buttonSize = autoToggleBtn.AbsoluteSize
+        --cleanupTweens()
         
-        -- Use fixed tooltip size instead of AbsoluteSize
-        local tooltipWidth = 80
-        local tooltipHeight = 24
-        
-        -- Center tooltip horizontally relative to button
-        local tooltipX = buttonPos.X + (buttonSize.X / 2) - (tooltipWidth / 2)
-        -- Position tooltip above the button with some spacing
-        local tooltipY = buttonPos.Y - tooltipHeight - 8
-        
-        autoToggleBtnTooltip.Position = UDim2.new(0, tooltipX, 0, tooltipY)
+        -- Position tooltip within viewport bounds
+        autoToggleBtnTooltip.Position = positionTooltipWithinViewport()
         autoToggleBtnTooltip.Visible = true
         isTooltipVisible = true
-        
         
         -- Animate in
         showTween = TweenService:Create(autoToggleBtnTooltip, tooltipTweenInfo, {
@@ -1242,18 +1278,14 @@ local function buildUI(gui)
             TextTransparency = 0
         })
         showTween:Play()
-        
     end)
 
     autoToggleBtn.MouseLeave:Connect(function()
         -- Only hide if currently visible
-        if not isTooltipVisible then 
-            return 
-        end
+        if not isTooltipVisible then return end
         
-        -- Cancel any existing tweens
-        if showTween then showTween:Cancel() end
-        if hideTween then hideTween:Cancel() end
+        -- Clean up any existing tweens
+        --cleanupTweens()
         
         -- Animate out
         hideTween = TweenService:Create(autoToggleBtnTooltip, tooltipTweenInfo, {
@@ -1262,12 +1294,16 @@ local function buildUI(gui)
         })
 
         hideTween:Play()
-        hideTween.Completed:Connect(function()
+        
+        -- Store connection for cleanup
+        hideConnection = hideTween.Completed:Connect(function()
             autoToggleBtnTooltip.Visible = false
             isTooltipVisible = false
             -- Reset transparency values for next show
             autoToggleBtnTooltip.BackgroundTransparency = 1
             autoToggleBtnTooltip.TextTransparency = 1
+            -- Clean up connection
+            hideConnection = nil
         end)
     end)
 
