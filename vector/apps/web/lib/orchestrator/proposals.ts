@@ -1,12 +1,17 @@
-import type { Proposal, Edit } from './index'
+import type { Proposal, Edit, EditFileChange } from './index'
 
 export function buildEdit(path: string, edits: Edit[], notes?: string): Proposal {
+  const fileChange: EditFileChange = {
+    path,
+    diff: { mode: 'rangeEDITS', edits },
+  }
   return {
     id: `edit_${Math.random().toString(36).slice(2, 8)}`,
     type: 'edit',
+    files: [fileChange],
     path,
     notes,
-    diff: { mode: 'rangeEDITS', edits },
+    diff: fileChange.diff,
   }
 }
 
@@ -18,4 +23,3 @@ export function buildRename(path: string, newName: string, notes?: string): Prop
     ops: [{ op: 'rename_instance', path, newName }],
   } as Proposal
 }
-

@@ -8,7 +8,7 @@
 
 * **Studio Plugin (Luau)**: docked chat + proposals, reads active editor state, previews diffs, applies edits inside **ChangeHistoryService**. Provider configuration is read from the backend `.env`.
 * **Next.js Backend (TypeScript)**: `/api/chat`, `/api/stream`, `/api/proposals/:id/apply`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM.
-* **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval.
+* **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval. Streaming includes clear indicators: `orchestrator.start …`, `tool.parsed <name>`, `tool.valid <name>`, `tool.result <name>`, `proposals.mapped <name> count=N`, `context.request <reason>`, and `error.*`.
 
 ---
 
@@ -30,7 +30,7 @@ Wait for each tool result before the next step.
 # Available tools (see JSON schemas below)
 - get_active_script()
 - list_selection()
-- list_open_documents()
+- list_open_documents(maxCount?)
 - show_diff(path, edits[])
 - apply_edit(path, edits[])
 - create_instance(className,parentPath,props)
@@ -91,7 +91,7 @@ These are the server‑registered tools exposed to the LLM. Keep schemas strict 
     {
       "name": "list_open_documents",
       "description": "Return a small list of open ScriptDocuments (path, optional ranges).",
-      "parameters": {"type": "object", "properties": {}, "required": []}
+      "parameters": {"type": "object", "properties": {"maxCount": {"type": "integer", "minimum": 1, "maximum": 100}}, "required": []}
     },
     {
       "name": "show_diff",
@@ -226,19 +226,20 @@ const ChatSchema = z.object({
     activeScript: z.object({ path: z.string(), text: z.string() }).nullable().optional(),
     selection: z.array(z.object({ className: z.string(), path: z.string() })).optional(),
     openDocs: z.array(z.object({ path: z.string() })).optional()
-  })
+  }),
+  autoApply: z.boolean().optional()
 })
 
 export async function POST(req: Request) {
   const input = ChatSchema.parse(await req.json())
-  const proposals = await runLLM(input) // returns structured proposals
-  return Response.json({ proposals })
+  const { proposals, taskState } = await runLLM(input) // proposals + TaskState snapshot
+  return Response.json({ proposals, taskState })
 }
 ```
 
 **Auto‑compaction (orchestrator)**
 
-* Track tokens (`tokensIn + tokensOut + cacheWrites + cacheReads`).
+* Track tokens (`tokensIn + tokensOut + cacheWrites + cacheReads`) and `contextRequests`.
 * If near the model window, summarise & truncate older turns (prefer keeping the latest + a summarized history). Store telemetry for debugging.
 
 ---
@@ -330,7 +331,7 @@ Note: For local dev, set `MESHY_API_KEY` in `vector/apps/web/.env.local`. Later 
 
 ## 6) Streaming & transport
 
-* **Plugin**: default to **short polling** or **long‑polling** `/api/stream?cursor=…`. If SSE is available and reliable in your environment, the plugin can use it; otherwise keep long‑poll.
+* **Plugin**: default to **short polling** or **long‑polling** `/api/stream?cursor=…`. If SSE is available and reliable in your environment, the plugin can use it; otherwise keep long‑poll. The stream store periodically cleans idle workflows to control memory.
 * **Web dashboard**: use SSE for token‑level streaming.
 * Limit concurrent plugin HTTP requests (≤2) to avoid Studio’s in‑flight cap.
 
@@ -465,7 +466,7 @@ export const Edit = z.object({ start: EditRange, end: EditRange, text: z.string(
 export const Tools = {
   get_active_script: z.object({}),
   list_selection: z.object({}),
-  list_open_documents: z.object({}),
+  list_open_documents: z.object({ maxCount: z.number().min(1).max(100).optional() }),
   show_diff: z.object({ path: z.string(), edits: z.array(Edit) }),
   apply_edit: z.object({ path: z.string(), edits: z.array(Edit) }),
   create_instance: z.object({ className: z.string(), parentPath: z.string(), props: z.record(z.any()).optional() }),
@@ -541,7 +542,7 @@ flowchart LR
 
 * **Only the plugin** can edit Roblox code/scene. The backend **never writes** to the place; it returns **proposals** (diffs, instance/property ops).
 * First call to your domain (e.g. Vercel) triggers Studio’s **HTTP domain permission** prompt; first write triggers **Script Modification** permission.
-* **Streaming inside Studio**: plugins **cannot** use WebSockets/SSE. Use **short/long‑polling** (`/api/stream` blocks up to N seconds, returns chunks). The web dashboard may use SSE.
+* **Streaming inside Studio**: use long‑polling (`/api/stream`). A separate SSE route (`/api/stream/sse`) is available for dashboards.
 * **Asset flows**: search via backend → propose → `InsertService:LoadAsset(assetId)` in plugin → optional `set_properties`.
 * **3D generation**: backend calls GPU service → uploads via **Open Cloud** → returns `assetId` → plugin inserts.
 
@@ -582,10 +583,44 @@ Wait for each tool result before the next step.
 | Tool                          | Purpose                                 | Params        | Returns                              | Runs where    |
 | ----------------------------- | --------------------------------------- | ------------- | ------------------------------------ | ------------- |
 | `get_active_script()`         | Read active editor tab content reliably | —             | `{ path, text, isDirty }`            | Plugin (Luau) |
-| `list_open_documents()`       | Enumerate open `ScriptDocument`s        | —             | `[{ path, isDirty }]`                | Plugin        |
+| `list_open_documents(maxCount?)` | Enumerate open `ScriptDocument`s     | `maxCount?`   | `[{ path, isDirty }]`                | Plugin        |
 | `list_selection()`            | Current Selection metadata              | —             | `[{ className, name, path, props }]` | Plugin        |
 | `list_children(path)`         | Explore hierarchy under a node          | `path`        | `[{ className, name, path }]`        | Plugin        |
 | `get_properties(path, keys?)` | Read specific props for an Instance     | `path, keys?` | `{ key:value }`                      | Plugin        |
+
+#### Plugin-only context tools (not exposed to the LLM)
+
+These tools run only inside the Studio plugin and are not listed in the backend tool registry. They are useful for manual diagnostics and future expansion, but should not be advertised in the system prompt (to avoid invalid tool emissions).
+
+- get_properties(path, keys?, opts?)
+  - Purpose: Read selected properties and/or attributes of an Instance at `path`.
+  - Params:
+    - `path` (string, required) — canonical GetFullName() path
+    - `keys` (string[], optional) — property names; entries beginning with `@` fetch attributes
+    - `opts` (object, optional) — `{ includeAllAttributes?: boolean, maxBytes?: number }` (default `maxBytes=32768`)
+  - Returns: object map of requested fields with JSON-safe typed wrappers
+  - Constraints: response size capped by `maxBytes`
+  - Errors: missing/invalid `path` yields `{}`; unreadable properties are skipped
+  - Example:
+    ```
+    <get_properties>
+      <path>game.Workspace.Tree</path>
+      <keys>["Position","Size","Anchored","@Health"]</keys>
+    </get_properties>
+    ```
+
+- list_children(path)
+  - Purpose: Enumerate immediate children under a node
+  - Params: `path` (string, required)
+  - Returns: array of `{ className, name, path }`
+  - Constraints: implementation supports depth/maxNodes caps and optional class filtering internally
+  - Errors: if `path` is not found, returns `[]`
+  - Example:
+    ```
+    <list_children>
+      <path>game.Workspace</path>
+    </list_children>
+    ```
 
 ### Editing tools (scripts & instances)
 
@@ -723,11 +758,12 @@ const Chat = z.object({
     activeScript: z.object({ path: z.string(), text: z.string() }).nullable(),
     selection: z.array(z.object({ className: z.string(), path: z.string() })).optional(),
   }),
+  autoApply: z.boolean().optional()
 })
 export async function POST(req: Request) {
   const input = Chat.parse(await req.json())
-  const proposals = await runLLM(input) // returns edit/object_op/asset_op
-  return Response.json({ proposals })
+  const { proposals, taskState } = await runLLM(input) // proposals + TaskState metadata
+  return Response.json({ proposals, taskState })
 }
 ```
 
@@ -780,7 +816,7 @@ You are Vector, a Roblox Studio copilot.
 Operating mode
 - Proposal-first: never write to code or instances directly. Always propose edits/ops; the plugin applies them only after user approval.
 - One tool per message: emit exactly one tool call per assistant turn; wait for the tool result before the next step.
-- Keep context small: request only the minimum context via tools (get_active_script, list_selection, list_open_documents, etc.) when needed.
+- Keep context small: request only the minimum context via tools (get_active_script, list_selection, list_open_documents, `list_code_definition_names`, `search_files`) when needed; prefer `@file/@folder/@url` mentions for explicit attachments.
 
 Tool call format (XML-like; one per message)
 <tool_name>
@@ -915,6 +951,14 @@ vector/
 
 Recent updates
 
+- 2026-07: Shipped checkpoint snapshots/restore, diff3-powered multi-file apply + conflict hunks, and the TaskState-driven progress UI (per-message auto checkpoints, manual Snapshot/Restore buttons in the plugin, run badges, token telemetry, and streamed conflict previews).
+- 2026-06: Composer UI rebuilt to match reference mockup (attachment chips, inline auto toggle, model selector, quick menu) and auto mode now auto-inserts catalog assets.
+- 2026-06: Model override pipeline added (`modelOverride` from plugin → API → orchestrator) with Gemini 2.5 Flash option in the Studio UI.
+- 2026-06: Implementation plan refreshed into Today/Next/This Week checklist (linting, atomic persistence, TaskState, auto-approval, checkpoints, diff upgrades, streaming, context, resilience, plugin UX, code tools).
+- 2026-06: ESLint config checked in; `npm run lint` now uses `eslint --max-warnings=0` and runs automatically before builds.
+- 2026-06: JSON persistence now journaled — `persist.ts` replays unapplied entries on boot and writes data via atomic temp-rename.
+- 2026-06: TaskState snapshots stored in `taskStates.json`; `/api/chat` returns `{ proposals, taskState }` with history, tool runs, and streaming status.
+- 2026-06: Mention attachments & code discovery — prompts can use `@file/@folder/@url/@problems`, new read-only tools (`list_code_definition_names`, `search_files`) expose project structure, OpenRouter retries use exponential backoff, and missing-context tools trigger automatic `CONTEXT_REQUEST` retries.
 - Added zod-based validation of provider tool-call arguments before mapping to proposals
 - Added Plan/Act scaffold: executes context tools locally and performs a second provider call for the next actionable tool
 - Switched proposals store to file-backed JSON durability (apps/web/data/proposals.json)
@@ -922,10 +966,16 @@ Recent updates
 - Server-side diff preview shaping (unified diff) added to edit proposals; plugin renders preview snippet
 - Provider errors now surfaced (no fallback when provider is configured via Settings); errors bubble to plugin UI
 
+Next focus (July 2026)
+
+- Conversation summarisation & guardrails — compact long histories, add safety prompts, and expose conversation caps so the agent stays within token limits.
+- Analysis/CI jobs and durable persistence — promote JSON stores to a durable DB layer, add `analyze_luau`/`run_tests` workflow steps, and surface job status in the progress panel.
+- UX polish — advanced chat shortcuts (Ask presets, slash commands), web dashboard for browsing proposals/history, and asset thumbnail proxying to complement the new progress HUD.
+
 Decisions captured
 
 - AI name: Vector (assistant name in UI and comments)
-- LLM provider: OpenRouter, model: moonshotai/kimi-k2:free
+- LLM provider: OpenRouter; server default `OPENROUTER_MODEL` (currently moonshotai/kimi-k2:free) with plugin override option for `gemini-2.5-flash` via model selector.
 - Package manager: npm
 - Hosting: Local dev at http://127.0.0.1:3000 for now. We will move to Vercel (or similar) later.
 - Domain permissions: local-only for now; will add hosted domain later when deploying.
@@ -936,11 +986,14 @@ Working now
 
 - Web (Next.js + npm)
   - Local app scaffold (Next 14) with npm scripts; landing page at /.
-  - API routes wired: /api/chat persists proposals to a file-backed store for auditing; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search calls a Catalog provider (falls back to stub data if `CATALOG_API_URL` unset); /api/assets/generate3d returns a stub jobId.
+  - API routes wired: /api/chat persists proposals to a file-backed store for auditing, returns `{ proposals, taskState }`, and accepts `autoApply` to mirror the Studio Auto toggle; /api/proposals/[id]/apply records an audit event; /api/proposals (GET) lists stored proposals; /api/assets/search calls a Catalog provider (falls back to stub data if `CATALOG_API_URL` unset); /api/assets/generate3d returns a stub jobId.
   - Provider tool-call parsing (OpenRouter) behind flags or per-request Settings: model outputs exactly one XML-like tool call which is parsed and mapped to proposals. Arguments validated with zod; when provider is configured, errors are surfaced (no fallback).
-  - Multi-turn Plan/Act: executes context tools locally (get_active_script, list_selection, list_open_documents), feeds results back into the conversation, and continues up to `VECTOR_MAX_TURNS` (default 4) until an actionable tool is emitted.
+  - Multi-turn Plan/Act: executes context tools locally (get_active_script, list_selection, list_open_documents, `list_code_definition_names`, `search_files`), ingests `@file/@folder/@url/@problems` mentions, auto-compacts history, and continues up to `VECTOR_MAX_TURNS` (default 4) until an actionable tool is emitted. When required context is missing, the orchestrator emits a single `CONTEXT_REQUEST …` prompt before retrying.
   - Provider adapters present: openrouter.ts (call path), openai.ts (stub).
-  - Timeouts: provider calls honor `OPENROUTER_TIMEOUT_MS` (default 30000ms); catalog fetch honors `CATALOG_TIMEOUT_MS` (default 15000ms).
+  - Timeouts & retries: provider calls honor `OPENROUTER_TIMEOUT_MS` (default 30000ms) and retry with backoff (`OPENROUTER_MAX_RETRIES`, `OPENROUTER_RETRY_DELAY_MS`, `OPENROUTER_RETRY_MAX_MS`); catalog fetch honors `CATALOG_TIMEOUT_MS` (default 15000ms).
+  - Streaming: shared event bus drives `/api/stream` (long-poll) and `/api/stream/sse` (Server-Sent Events) so dashboards can mirror Cursor-style live updates.
+  - Multi-file apply flow: diff3 merges run on `/api/proposals/[id]/apply`, conflicts return structured hunks for the plugin, and automatic/manual checkpoints keep TaskState + workspace recoverable.
+  - `npm run build` passes; `npm run lint` runs `eslint --max-warnings=0` via the committed `.eslintrc.json` and is wired as `prebuild`.
 - Plugin (Vector)
   - Dock UI with input + Send. Sends context (active script + selection) to /api/chat and renders proposals.
   - Approve/Reject per proposal; applies:
@@ -948,8 +1001,10 @@ Working now
     - object_op rename_instance (ChangeHistoryService wrapped)
   - Provider settings panel removed (env-driven). Backend reads provider creds from `.env.local`.
   - Reports apply results back to /api/proposals/:id/apply for auditing.
-  - Diff preview snippet: shows unified diff from server for quick review.
-  - Sidebar UX (Cursor-like): top composer + “Retry” and “Next” buttons; a dedicated “Status” panel streams planning/progress lines; proposals list below.
+  - Diff preview + conflict UI: renders unified diffs by default and switches to a three-column conflict hunk viewer when diff3 detects overlaps.
+  - Sidebar UX (Cursor-like with mockup parity): attachment chips row, “Write, @ for context, / for commands” placeholder, ∞/Agent pill that doubles as the Auto toggle, model selector chip (server default vs `gemini-2.5-flash`), image button exposing a Retry/Next quick menu, status panel with streaming updates, and proposals list below.
+  - Progress HUD: TaskState-driven progress bar, run badges, checkpoint metadata, and Snapshot/Restore buttons wired to `/api/checkpoints`; streaming telemetry lines update the UI in real time.
+  - Auto mode applies edit/object ops and now auto-inserts catalog assets when proposals arrive with `meta.autoApproved === true`; others remain for manual review, preventing risky unattended actions.
 
 
 ---
@@ -961,6 +1016,11 @@ Working now
   - `OPENROUTER_API_KEY=` (leave blank to use fallbacks)
   - `OPENROUTER_MODEL=moonshotai/kimi-k2:free`
   - `VECTOR_USE_OPENROUTER=0` (set to `1` to enable provider)
+  - `OPENROUTER_MAX_RETRIES=3` (optional retry count; default 3)
+  - `OPENROUTER_RETRY_DELAY_MS=1000` (initial backoff in ms; default 1000)
+  - `OPENROUTER_RETRY_MAX_MS=10000` (max backoff cap in ms; default 10000)
+  - `VECTOR_WORKSPACE_ROOT=` (optional absolute path override for `@file/@folder` and search tools)
+  - `VECTOR_PROBLEMS_FILE=` (optional absolute/relative path for `@problems` mention; defaults to `<root>/problems.log`)
 - Transport & Security:
   - The plugin does not send provider credentials; the backend reads `process.env`.
   - The plugin calls your backend at `http://127.0.0.1:3000` by default in dev.
@@ -1260,7 +1320,7 @@ Each provider call includes:
 ## System Wiring Audit (Repo Snapshot)
 
 - Web Orchestrator: `vector/apps/web/lib/orchestrator/index.ts` maps tool calls → proposals and streams status via `/api/stream`.
-- Tool Schemas (web): `vector/apps/web/lib/tools/schemas.ts` defines these tools: `get_active_script`, `list_selection`, `list_open_documents`, `show_diff`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, `generate_asset_3d`.
+- Tool Schemas (web): `vector/apps/web/lib/tools/schemas.ts` defines these tools: `get_active_script`, `list_selection`, `list_open_documents`, `show_diff`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, `generate_asset_3d`, `list_code_definition_names`, `search_files`.
 - Plugin Tools (Luau): `vector/plugin/src/tools/` implements: `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`, plus extra read tools `get_properties`, `list_children`.
 - API Routes (web):
   - `POST /api/chat` → orchestrator → proposals persisted (`lib/store/proposals.ts`) and workflow steps (`lib/store/workflows.ts`).
@@ -1319,7 +1379,7 @@ Optional next steps
 - Orchestrator (`[orch]` + stream):
   - Start: `orchestrator.start provider=… mode=…`
   - Provider calls: `provider.response turn=X chars=Y` (and console `[orch] provider.ok/error …`)
-  - Tool flow: `tool.parsed NAME`, `tool.valid NAME`, `proposals.mapped NAME count=N`.
+  - Tool flow: `tool.parsed NAME`, `tool.valid NAME`, `tool.result NAME`, `proposals.mapped NAME count=N`, `context.request REASON`.
   - Fallbacks: `fallback.edit`, `fallback.object`, `fallback.asset`.
 - Chat route (`[chat]`): request summary + proposals stored.
 - Assets routes (`[assets.search]`, `[assets.generate3d]`): query, counts, timings.
@@ -1332,7 +1392,7 @@ All of the above log to the Next.js terminal by default. The same high‑signal 
 
 ## Tool Inventory (Web ↔ Plugin)
 
-- Shared (wired): `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`.
+- Shared (wired): `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `list_code_definition_names`, `search_files`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`.
 - Web‑only: `show_diff` (proposal preview), `generate_asset_3d` (stubbed API; plugin calls endpoint).
 - Plugin‑only (currently unused by LLM): `get_properties`, `list_children`.
 

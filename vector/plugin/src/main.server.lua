@@ -24,8 +24,35 @@ local ToolApplyEdit = require(script.Parent.tools.apply_edit)
 
 print("[Vector] imported modules")
 
+_G.__VECTOR_PROGRESS = _G.__VECTOR_PROGRESS or 0
+_G.__VECTOR_RUNS = _G.__VECTOR_RUNS or {}
+_G.__VECTOR_LAST_WORKFLOW_ID = _G.__VECTOR_LAST_WORKFLOW_ID or nil
+
 -- UI state (shared across UI and actions)
 local CURRENT_MODE = "agent" -- or "ask"
+
+local MODEL_OPTIONS = {
+	{ id = "server", label = "server (.env)", override = nil },
+	{ id = "gemini-2.5-flash", label = "gemini-2.5-flash", override = "gemini-2.5-flash" },
+}
+
+local function clampModelIndex(idx)
+	if type(idx) ~= "number" then return 1 end
+	if idx < 1 or idx > #MODEL_OPTIONS then return 1 end
+	return math.floor(idx)
+end
+
+local function setModelOverride(idx)
+	local clamped = clampModelIndex(idx)
+	local opt = MODEL_OPTIONS[clamped] or MODEL_OPTIONS[1]
+	_G.__VECTOR_MODEL_INDEX = clamped
+	_G.__VECTOR_MODEL_OVERRIDE = opt.override
+	return opt
+end
+
+local function getModelOverride()
+	return _G.__VECTOR_MODEL_OVERRIDE
+end
 
 local function getActiveScriptContext()
 	local s = StudioService.ActiveScript
@@ -185,6 +212,45 @@ local function applyRangeEdits(oldText, edits)
 		newText = string.sub(newText, 1, e.sidx - 1) .. e.text .. string.sub(newText, e.eidx)
 	end
 	return newText
+end
+
+local function getProposalEditFiles(proposal)
+	if proposal.files and #proposal.files > 0 then
+		return proposal.files
+	elseif proposal.path and proposal.diff then
+		return { { path = proposal.path, diff = proposal.diff, safety = proposal.safety } }
+	else
+		return {}
+	end
+end
+
+local function getPrimaryFile(proposal)
+	local list = getProposalEditFiles(proposal)
+	return list[1]
+end
+
+local function collectEditContexts(proposal)
+	local files = getProposalEditFiles(proposal)
+	local contexts = {}
+	for _, file in ipairs(files) do
+		if not file.path then return false, nil, "Missing file path" end
+		local inst = resolveByFullName(file.path)
+		if not inst then
+			return false, nil, "Instance not found: " .. tostring(file.path)
+		end
+		local okSrc, currentText = pcall(function()
+			return ScriptEditorService:GetEditorSource(inst)
+		end)
+		if not okSrc then
+			return false, nil, "Cannot read source for " .. tostring(file.path)
+		end
+		table.insert(contexts, {
+			definition = file,
+			instance = inst,
+			currentText = currentText,
+		})
+	end
+	return true, contexts
 end
 
 -- SHA-1 for edit safety
@@ -425,28 +491,114 @@ local function renderUnifiedDiff(container, oldText, newText)
 	container.CanvasSize = UDim2.new(0, 0, 0, container.UIListLayout.AbsoluteContentSize.Y + 8)
 end
 
-local function applyEditProposal(proposal)
-    ensurePermissionWithStatus()
-	local inst = resolveByFullName(proposal.path)
-	if not inst then
-		return false, "Instance not found: " .. tostring(proposal.path)
-	end
-	local okSrc, old = pcall(function()
-		return ScriptEditorService:GetEditorSource(inst)
-	end)
-	if not okSrc then
-		return false, "Cannot read editor source"
-	end
-	-- Safety: ensure the file hasn't changed since preview
-	if proposal.safety and proposal.safety.beforeHash then
-		local currentHash = sha1(old)
-		if string.lower(tostring(proposal.safety.beforeHash)) ~= string.lower(currentHash) then
-			return false, "Edit conflict: file changed since preview. Re-open diff to refresh."
+local function renderConflictDetails(container, files)
+	container:ClearAllChildren()
+	local layout = Instance.new("UIListLayout")
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 6)
+	layout.Parent = container
+	for _, file in ipairs(files or {}) do
+		local header = Instance.new("TextLabel")
+		header.BackgroundTransparency = 1
+		header.TextXAlignment = Enum.TextXAlignment.Left
+		header.Font = Enum.Font.GothamBold
+		header.TextSize = 16
+		header.Size = UDim2.new(1, -8, 0, 22)
+		header.Text = "Conflicts in " .. tostring(file.path or "<unknown>")
+		header.Parent = container
+
+		local openBtn = Instance.new("TextButton")
+		openBtn.Text = "Open Script"
+		openBtn.Size = UDim2.new(0, 100, 0, 20)
+		openBtn.Position = UDim2.new(1, -108, 0, 2)
+		openBtn.Parent = header
+		openBtn.MouseButton1Click:Connect(function()
+			openScriptByPath(file.path)
+		end)
+
+		for _, hunk in ipairs(file.conflicts or {}) do
+			local hFrame = Instance.new("Frame")
+			hFrame.BackgroundTransparency = 0.3
+			hFrame.BackgroundColor3 = Color3.fromRGB(40, 20, 20)
+			hFrame.Size = UDim2.new(1, -8, 0, 120)
+			hFrame.Parent = container
+
+			local function addBlock(label, text, index, color)
+				local block = Instance.new("TextLabel")
+				block.BackgroundTransparency = 0.4
+				block.BackgroundColor3 = color
+				block.TextXAlignment = Enum.TextXAlignment.Left
+				block.TextYAlignment = Enum.TextYAlignment.Top
+				block.TextWrapped = true
+				block.Font = Enum.Font.Code
+				block.TextSize = 12
+				block.Size = UDim2.new(1/3, -12, 1, -8)
+				block.Position = UDim2.new((index - 1) / 3, 4, 0, 4)
+				block.Text = label .. "\n" .. (text or "")
+				block.Parent = hFrame
+			end
+
+			addBlock("Base", hunk.base, 1, Color3.fromRGB(30, 30, 40))
+			addBlock("Current", hunk.current, 2, Color3.fromRGB(40, 30, 30))
+			addBlock("Proposed", hunk.proposed, 3, Color3.fromRGB(30, 40, 30))
 		end
 	end
-	local newText = applyRangeEdits(old, proposal.diff.edits or {})
-	local res = ToolApplyEdit({ script = inst, edits = { __finalText = newText }, beforeHash = proposal.safety and proposal.safety.beforeHash or nil })
-	return res and res.ok == true, res and res.error
+	container.CanvasSize = UDim2.new(0, 0, 0, layout.AbsoluteContentSize.Y + 12)
+end
+
+local function applyEditProposal(proposal)
+    ensurePermissionWithStatus()
+	local okCtx, contextsOrErr = collectEditContexts(proposal)
+	if not okCtx then
+		return false, contextsOrErr
+	end
+	local contexts = contextsOrErr
+	local base = getBackendBaseUrl()
+	local url = string.format("%s/api/proposals/%s/apply", base, tostring(proposal.id))
+	local filesPayload = {}
+	for _, ctx in ipairs(contexts) do
+		table.insert(filesPayload, {
+			path = ctx.definition.path,
+			currentText = ctx.currentText,
+		})
+	end
+	local resp = Http.postJson(url, { action = "merge", files = filesPayload })
+	if not resp.Success then
+		return false, "HTTP " .. tostring(resp.StatusCode)
+	end
+	local okJson, parsed = pcall(function()
+		return HttpService:JSONDecode(resp.Body)
+	end)
+	if not okJson then
+		return false, "Invalid JSON from merge"
+	end
+	if parsed.status == "conflict" then
+		proposal.__conflicts = parsed.files or {}
+		return false, "Merge conflict", parsed.files
+	end
+	if parsed.status ~= "merged" then
+		return false, parsed.error or "Merge failed"
+	end
+	proposal.__conflicts = nil
+	local results = parsed.files or {}
+	local byPath = {}
+	for _, entry in ipairs(results) do
+		if entry.path then byPath[entry.path] = entry end
+	end
+	for _, ctx in ipairs(contexts) do
+		local result = byPath[ctx.definition.path]
+		if not result or type(result.mergedText) ~= "string" then
+			return false, "Merge missing text for " .. tostring(ctx.definition.path)
+		end
+		local res = ToolApplyEdit({ script = ctx.instance, edits = { __finalText = result.mergedText }, beforeHash = sha1(ctx.currentText) })
+		if not res or res.ok ~= true then
+			if res and res.conflict then
+				return false, "Script changed while applying. Re-open diff to refresh."
+			end
+			return false, res and res.error or "Apply failed"
+		end
+	end
+	return true, nil, results
 end
 
 local function openScriptByPath(path)
@@ -513,6 +665,46 @@ local function fetchAssets(query, limit)
 		return false, "Invalid JSON"
 	end
 	return true, json.results or {}
+end
+
+local function checkpointsBaseUrl()
+    return string.format("%s/api/checkpoints", getBackendBaseUrl())
+end
+
+local function createCheckpointRequest(workflowId, note)
+    if not workflowId then return false, "missing workflowId" end
+    local url = checkpointsBaseUrl()
+    local resp = Http.postJson(url, { workflowId = workflowId, note = note })
+    if not resp.Success then return false, "HTTP " .. tostring(resp.StatusCode) end
+    local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+    if not ok or type(parsed) ~= "table" or not parsed.checkpoint then
+        return false, "Invalid checkpoint response"
+    end
+    return true, parsed.checkpoint
+end
+
+local function listCheckpointsRequest(workflowId)
+    if not workflowId then return false, "missing workflowId" end
+    local url = string.format("%s?workflowId=%s", checkpointsBaseUrl(), HttpService:UrlEncode(workflowId))
+    local resp = Http.getJson(url)
+    if not resp.Success then return false, "HTTP " .. tostring(resp.StatusCode) end
+    local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+    if not ok or type(parsed) ~= "table" or not parsed.checkpoints then
+        return false, "Invalid checkpoint list"
+    end
+    return true, parsed.checkpoints
+end
+
+local function restoreCheckpointRequest(checkpointId, mode)
+    if not checkpointId then return false, "missing checkpoint id" end
+    local url = string.format("%s/%s/restore", checkpointsBaseUrl(), HttpService:UrlEncode(tostring(checkpointId)))
+    local resp = Http.postJson(url, { mode = mode or "both" })
+    if not resp.Success then return false, "HTTP " .. tostring(resp.StatusCode) end
+    local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+    if not ok or type(parsed) ~= "table" or not parsed.checkpoint then
+        return false, "Invalid checkpoint restore"
+    end
+    return true, parsed.checkpoint
 end
 
 local function insertAsset(assetId, parentPath)
@@ -607,6 +799,21 @@ local function buildUI(gui)
         stroke.Parent = frame
     end
 
+    local function styleIconButton(btn)
+        btn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+        btn.TextColor3 = Color3.fromRGB(210, 210, 210)
+        btn.BorderSizePixel = 0
+        btn.Font = Enum.Font.Gotham
+        btn.TextSize = 14
+        local corner = Instance.new("UICorner")
+        corner.CornerRadius = UDim.new(1, 0)
+        corner.Parent = btn
+        local stroke = Instance.new("UIStroke")
+        stroke.Color = Color3.fromRGB(70, 70, 70)
+        stroke.Thickness = 1
+        stroke.Parent = btn
+    end
+
 	local inputRow = Instance.new("Frame")
 	inputRow.Name = "InputRow"
 	-- Composer container: no outer border and auto-size vertically
@@ -641,168 +848,306 @@ local function buildUI(gui)
     vlist.Padding = UDim.new(0, 6)
     vlist.Parent = card
 
-    -- Meta row (chips + percent placeholder)
+    -- Meta row: attachment indicators to match provided mockup
     local meta = Instance.new("Frame")
     meta.Name = "Meta"
-    meta.Size = UDim2.new(1, 0, 0, 20)
+    meta.Size = UDim2.new(1, 0, 0, 28)
     meta.BackgroundTransparency = 1
     meta.LayoutOrder = 1
     meta.Parent = card
-    local hlist = Instance.new("UIListLayout")
-    hlist.FillDirection = Enum.FillDirection.Horizontal
-    hlist.Padding = UDim.new(0, 6)
-    hlist.SortOrder = Enum.SortOrder.LayoutOrder
-    hlist.Parent = meta
+    local metaLayout = Instance.new("UIListLayout")
+    metaLayout.FillDirection = Enum.FillDirection.Horizontal
+    metaLayout.Padding = UDim.new(0, 6)
+    metaLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    metaLayout.Parent = meta
 
-    local chip1 = Instance.new("Frame")
-    chip1.Size = UDim2.new(0, 24, 1, 0)
-    styleChip(chip1)
-    chip1.Parent = meta
-    local c1 = Instance.new("TextLabel")
-    c1.BackgroundTransparency = 1
-    c1.Size = UDim2.new(1, 0, 1, 0)
-    c1.Font = Enum.Font.Gotham
-    c1.TextSize = 12
-    c1.TextColor3 = Color3.fromRGB(200, 200, 200)
-    c1.Text = "@"
-    c1.Parent = chip1
+    local function makeChip(text)
+        local chip = Instance.new("Frame")
+        chip.AutomaticSize = Enum.AutomaticSize.X
+        chip.Size = UDim2.new(0, 0, 1, 0)
+        styleChip(chip)
+        chip.Parent = meta
+        local pad = Instance.new("UIPadding")
+        pad.PaddingLeft = UDim.new(0, 10)
+        pad.PaddingRight = UDim.new(0, 10)
+        pad.Parent = chip
+        local label = Instance.new("TextLabel")
+        label.BackgroundTransparency = 1
+        label.Size = UDim2.new(1, 0, 1, 0)
+        label.Font = Enum.Font.Gotham
+        label.TextSize = 12
+        label.TextColor3 = Color3.fromRGB(200, 200, 200)
+        label.Text = text
+        label.Parent = chip
+        return chip
+    end
 
-    local chip2 = Instance.new("Frame")
-    chip2.Size = UDim2.new(0, 60, 1, 0)
-    styleChip(chip2)
-    chip2.Parent = meta
-    local c2 = Instance.new("TextLabel")
-    c2.BackgroundTransparency = 1
-    c2.Size = UDim2.new(1, -8, 1, 0)
-    c2.Position = UDim2.new(0, 8, 0, 0)
-    c2.TextXAlignment = Enum.TextXAlignment.Left
-    c2.Font = Enum.Font.Gotham
-    c2.TextSize = 12
-    c2.TextColor3 = Color3.fromRGB(200, 200, 200)
-    c2.Text = "1 Tab"
-    c2.Parent = chip2
+    makeChip("@")
+    local chip2 = makeChip("1 Tab")
 
-    -- Right-aligned chips (Retry/Next) using an inset container
-    local spacer = Instance.new("Frame")
-    spacer.BackgroundTransparency = 1
-    spacer.Size = UDim2.new(1, -160, 1, 0)
-    spacer.LayoutOrder = 2
-    spacer.Parent = meta
-
-    local retryBtn = Instance.new("TextButton")
-    retryBtn.AutoButtonColor = true
-    retryBtn.Size = UDim2.new(0, 56, 1, 0)
-    retryBtn.Text = "Retry"
-    styleChip(retryBtn)
-    retryBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    retryBtn.Font = Enum.Font.Gotham
-    retryBtn.TextSize = 12
-    retryBtn.Parent = meta
-
-    local nextBtn = Instance.new("TextButton")
-    nextBtn.Size = UDim2.new(0, 52, 1, 0)
-    nextBtn.Text = "Next"
-    styleChip(nextBtn)
-    nextBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    nextBtn.Font = Enum.Font.Gotham
-    nextBtn.TextSize = 12
-    nextBtn.Parent = meta
-
-    -- Percent + spinner chip on the right
-    local pctChip = Instance.new("Frame")
-    pctChip.Size = UDim2.new(0, 62, 1, 0)
-    styleChip(pctChip)
-    pctChip.Parent = meta
     local pctLbl = Instance.new("TextLabel")
+    pctLbl.Name = "ProgressLabel"
+    pctLbl.AnchorPoint = Vector2.new(1, 0)
+    pctLbl.Position = UDim2.new(1, -6, 0, 6)
+    pctLbl.Size = UDim2.new(0, 64, 0, 16)
     pctLbl.BackgroundTransparency = 1
-    pctLbl.Size = UDim2.new(1, -18, 1, 0)
-    pctLbl.Position = UDim2.new(0, 6, 0, 0)
-    pctLbl.TextXAlignment = Enum.TextXAlignment.Left
     pctLbl.Font = Enum.Font.Gotham
     pctLbl.TextSize = 12
-    pctLbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    pctLbl.TextColor3 = Color3.fromRGB(160, 160, 160)
+    pctLbl.TextXAlignment = Enum.TextXAlignment.Right
     pctLbl.Text = "0.0%"
-    pctLbl.Parent = pctChip
-    local spin = Instance.new("TextLabel")
-    spin.BackgroundTransparency = 1
-    spin.Size = UDim2.new(0, 12, 1, 0)
-    spin.Position = UDim2.new(1, -14, 0, 0)
-    spin.Font = Enum.Font.Gotham
-    spin.TextSize = 12
-    spin.TextColor3 = Color3.fromRGB(200, 200, 200)
-    spin.Text = "◴"
-    spin.Parent = pctChip
-    task.spawn(function()
-        local seq = {"◴","◷","◶","◵"}
-        local i = 1
-        while card.Parent do
-            spin.Text = seq[i]
-            i += 1; if i > #seq then i = 1 end
-            task.wait(0.12)
-        end
-    end)
+    pctLbl.Visible = false
+    pctLbl.Parent = card
+
+    local stateRow = Instance.new("Frame")
+    stateRow.Name = "StateRow"
+    stateRow.Size = UDim2.new(1, -12, 0, 0)
+    stateRow.AutomaticSize = Enum.AutomaticSize.Y
+    stateRow.Position = UDim2.new(0, 6, 0, 0)
+    stateRow.BackgroundTransparency = 1
+    stateRow.Visible = false
+    stateRow.Parent = root
+
+    local stateLayout = Instance.new("UIListLayout")
+    stateLayout.FillDirection = Enum.FillDirection.Vertical
+    stateLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    stateLayout.Padding = UDim.new(0, 6)
+    stateLayout.Parent = stateRow
+
+    local progressRow = Instance.new("Frame")
+    progressRow.BackgroundTransparency = 1
+    progressRow.Size = UDim2.new(1, -12, 0, 16)
+    progressRow.AutomaticSize = Enum.AutomaticSize.Y
+    progressRow.Parent = stateRow
+
+    local progressBg = Instance.new("Frame")
+    progressBg.Size = UDim2.new(1, 0, 0, 8)
+    progressBg.Position = UDim2.new(0, 0, 0, 4)
+    progressBg.BackgroundColor3 = Color3.fromRGB(46, 46, 46)
+    progressBg.BorderSizePixel = 0
+    progressBg.Parent = progressRow
+    local progressCorner = Instance.new("UICorner")
+    progressCorner.CornerRadius = UDim.new(0, 4)
+    progressCorner.Parent = progressBg
+
+    local progressFill = Instance.new("Frame")
+    progressFill.Size = UDim2.new(0, 0, 1, 0)
+    progressFill.BackgroundColor3 = Color3.fromRGB(120, 190, 140)
+    progressFill.BorderSizePixel = 0
+    progressFill.Parent = progressBg
+    local progressFillCorner = Instance.new("UICorner")
+    progressFillCorner.CornerRadius = UDim.new(0, 4)
+    progressFillCorner.Parent = progressFill
+
+    local runsRow = Instance.new("Frame")
+    runsRow.BackgroundTransparency = 1
+    runsRow.Size = UDim2.new(1, -12, 0, 26)
+    runsRow.Visible = false
+    runsRow.Parent = stateRow
+    local runsLayout = Instance.new("UIListLayout")
+    runsLayout.Name = "RunsLayout"
+    runsLayout.FillDirection = Enum.FillDirection.Horizontal
+    runsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+    runsLayout.Padding = UDim.new(0, 6)
+    runsLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    runsLayout.Parent = runsRow
+
+    local checkpointRow = Instance.new("Frame")
+    checkpointRow.BackgroundTransparency = 1
+    checkpointRow.Size = UDim2.new(1, -12, 0, 24)
+    checkpointRow.Parent = stateRow
+    local checkpointLayout = Instance.new("UIListLayout")
+    checkpointLayout.FillDirection = Enum.FillDirection.Horizontal
+    checkpointLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    checkpointLayout.Padding = UDim.new(0, 8)
+    checkpointLayout.Parent = checkpointRow
+
+    local checkpointLabel = Instance.new("TextLabel")
+    checkpointLabel.Name = "CheckpointLabel"
+    checkpointLabel.BackgroundTransparency = 1
+    checkpointLabel.Font = Enum.Font.Gotham
+    checkpointLabel.TextSize = 12
+    checkpointLabel.TextColor3 = Color3.fromRGB(170, 170, 170)
+    checkpointLabel.TextXAlignment = Enum.TextXAlignment.Left
+    checkpointLabel.AutomaticSize = Enum.AutomaticSize.X
+    checkpointLabel.Text = "Last checkpoint: (none)"
+    checkpointLabel.Parent = checkpointRow
+
+    local snapshotBtn = Instance.new("TextButton")
+    snapshotBtn.Name = "SnapshotButton"
+    snapshotBtn.Text = "Snapshot"
+    snapshotBtn.Size = UDim2.new(0, 90, 0, 22)
+    styleButton(snapshotBtn)
+    snapshotBtn.Parent = checkpointRow
+
+    local restoreBtn = Instance.new("TextButton")
+    restoreBtn.Name = "RestoreButton"
+    restoreBtn.Text = "Restore"
+    restoreBtn.Size = UDim2.new(0, 90, 0, 22)
+    styleButton(restoreBtn)
+    restoreBtn.Parent = checkpointRow
 
     -- Multiline input box
     local textBox = Instance.new("TextBox")
-    textBox.LayoutOrder = 3
+    textBox.LayoutOrder = 2
     textBox.MultiLine = true
     textBox.TextWrapped = true
-    textBox.PlaceholderText = "Plan, search, build anything"
+    textBox.PlaceholderText = "Write, @ for context, / for commands"
     textBox.Text = ""
     textBox.ClearTextOnFocus = false
     textBox.Size = UDim2.new(1, 0, 0, 90)
     styleInput(textBox)
     textBox.Parent = card
 
-    -- Controls row: mode pill + model label + send circle
+    -- Controls row rebuilt to mirror the mockup
     local controls = Instance.new("Frame")
     controls.BackgroundTransparency = 1
-    controls.Size = UDim2.new(1, 0, 0, 28)
-    controls.LayoutOrder = 4
+    controls.Size = UDim2.new(1, 0, 0, 32)
+    controls.LayoutOrder = 3
     controls.Parent = card
-    local h2 = Instance.new("UIListLayout")
-    h2.FillDirection = Enum.FillDirection.Horizontal
-    h2.Padding = UDim.new(0, 8)
-    h2.Parent = controls
 
-    local autoBtn = Instance.new("TextButton")
-    autoBtn.Size = UDim2.new(0, 64, 1, 0)
-    autoBtn.Text = "Auto"
-    styleChip(autoBtn)
-    autoBtn.Parent = controls
+    local baseRightWidth = 72
+
+    local leftControls = Instance.new("Frame")
+    leftControls.BackgroundTransparency = 1
+    leftControls.Size = UDim2.new(1, -(baseRightWidth + 6), 1, 0)
+    leftControls.Parent = controls
+    local leftLayout = Instance.new("UIListLayout")
+    leftLayout.FillDirection = Enum.FillDirection.Horizontal
+    leftLayout.Padding = UDim.new(0, 8)
+    leftLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    leftLayout.Parent = leftControls
+
+    local rightControls = Instance.new("Frame")
+    rightControls.BackgroundTransparency = 1
+    rightControls.AnchorPoint = Vector2.new(1, 0)
+    rightControls.Position = UDim2.new(1, 0, 0, 0)
+    rightControls.Size = UDim2.new(0, baseRightWidth, 1, 0)
+    rightControls.Parent = controls
+    local rightLayout = Instance.new("UIListLayout")
+    rightLayout.FillDirection = Enum.FillDirection.Horizontal
+    rightLayout.Padding = UDim.new(0, 6)
+    rightLayout.HorizontalAlignment = Enum.HorizontalAlignment.Right
+    rightLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    rightLayout.Parent = rightControls
+
+    local modeChip = Instance.new("Frame")
+    modeChip.AutomaticSize = Enum.AutomaticSize.X
+    modeChip.Size = UDim2.new(0, 0, 1, 0)
+    modeChip.ClipsDescendants = true
+    styleChip(modeChip)
+    modeChip.Parent = leftControls
+    local modePad = Instance.new("UIPadding")
+    modePad.PaddingLeft = UDim.new(0, 10)
+    modePad.PaddingRight = UDim.new(0, 10)
+    modePad.Parent = modeChip
+    local modeLayout = Instance.new("UIListLayout")
+    modeLayout.FillDirection = Enum.FillDirection.Horizontal
+    modeLayout.Padding = UDim.new(0, 6)
+    modeLayout.VerticalAlignment = Enum.VerticalAlignment.Center
+    modeLayout.Parent = modeChip
+
+    local autoToggleBtn = Instance.new("TextButton")
+    autoToggleBtn.BackgroundTransparency = 1
+    autoToggleBtn.AutoButtonColor = false
+    autoToggleBtn.Size = UDim2.new(0, 20, 1, 0)
+    autoToggleBtn.Text = "∞"
+    autoToggleBtn.Font = Enum.Font.Gotham
+    autoToggleBtn.TextSize = 16
+    autoToggleBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
+    autoToggleBtn.Parent = modeChip
 
     local modeBtn = Instance.new("TextButton")
-    modeBtn.Size = UDim2.new(0, 84, 1, 0)
-    modeBtn.Text = "Agent"
-    styleChip(modeBtn)
-    modeBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    modeBtn.BackgroundTransparency = 1
+    modeBtn.AutoButtonColor = false
+    modeBtn.Size = UDim2.new(0, 0, 1, 0)
+    modeBtn.AutomaticSize = Enum.AutomaticSize.X
+    modeBtn.TextXAlignment = Enum.TextXAlignment.Left
     modeBtn.Font = Enum.Font.Gotham
     modeBtn.TextSize = 12
-    modeBtn.Parent = controls
+    modeBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    modeBtn.Text = "Agent ⌘I"
+    modeBtn.Parent = modeChip
 
     local modelBtn = Instance.new("TextButton")
     modelBtn.AutoButtonColor = false
-    modelBtn.Active = false
-    --modelBtn.TextXAlignment = Enum.TextXAlignment.Left --commented out to prevent it from being left aligned
-    -- Adjust for Auto(64) + Mode(84) + Send(28) + 3 gaps(8 each) = 192 + small buffer
-    modelBtn.Size = UDim2.new(1, -196, 1, 0)
-    modelBtn.Text = "grok-code-fast-1"
-    styleChip(modelBtn)
-    modelBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    modelBtn.Active = true
+    modelBtn.AutomaticSize = Enum.AutomaticSize.X
+    modelBtn.Size = UDim2.new(0, 0, 1, 0)
+    modelBtn.TextXAlignment = Enum.TextXAlignment.Left
+    modelBtn.Text = ""
     modelBtn.Font = Enum.Font.Gotham
     modelBtn.TextSize = 12
-    modelBtn.Parent = controls
+    modelBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    styleChip(modelBtn)
+    local modelPad = Instance.new("UIPadding")
+    modelPad.PaddingLeft = UDim.new(0, 10)
+    modelPad.PaddingRight = UDim.new(0, 10)
+    modelPad.Parent = modelBtn
+    modelBtn.Parent = leftControls
+
+    local imageBtn = Instance.new("TextButton")
+    imageBtn.Size = UDim2.new(0, 28, 0, 28)
+    imageBtn.Text = "🖼"
+    styleIconButton(imageBtn)
+    imageBtn.Parent = rightControls
 
     local sendBtn = Instance.new("TextButton")
-    sendBtn.Size = UDim2.new(0, 28, 1, 0)
+    sendBtn.Size = UDim2.new(0, 28, 0, 28)
     sendBtn.Text = "↑"
-    styleChip(sendBtn)
-    sendBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
-    sendBtn.Font = Enum.Font.Gotham
-    sendBtn.TextSize = 14
-    sendBtn.Parent = controls
+    styleIconButton(sendBtn)
+    sendBtn.Parent = rightControls
 
-    -- Model selection is managed by backend .env; keep label only
+    local quickMenu = Instance.new("Frame")
+    quickMenu.Name = "QuickMenu"
+    quickMenu.Size = UDim2.new(0, 140, 0, 92)
+    quickMenu.AnchorPoint = Vector2.new(1, 0)
+    quickMenu.Position = UDim2.new(1, -8, 1, 8)
+    quickMenu.BackgroundTransparency = 0
+    quickMenu.Visible = false
+    quickMenu.ZIndex = 50
+    styleFrame(quickMenu)
+    quickMenu.Parent = card
+    local quickPad = Instance.new("UIPadding")
+    quickPad.PaddingTop = UDim.new(0, 10)
+    quickPad.PaddingBottom = UDim.new(0, 10)
+    quickPad.PaddingLeft = UDim.new(0, 10)
+    quickPad.PaddingRight = UDim.new(0, 10)
+    quickPad.Parent = quickMenu
+    local quickLayout = Instance.new("UIListLayout")
+    quickLayout.FillDirection = Enum.FillDirection.Vertical
+    quickLayout.Padding = UDim.new(0, 8)
+    quickLayout.Parent = quickMenu
+
+    local retryBtn = Instance.new("TextButton")
+    retryBtn.AutoButtonColor = true
+    retryBtn.ZIndex = 51
+    retryBtn.Size = UDim2.new(1, 0, 0, 24)
+    retryBtn.Text = "Retry"
+    styleChip(retryBtn)
+    retryBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    retryBtn.Font = Enum.Font.Gotham
+    retryBtn.TextSize = 12
+    retryBtn.Parent = quickMenu
+
+    local nextBtn = Instance.new("TextButton")
+    nextBtn.AutoButtonColor = true
+    nextBtn.ZIndex = 51
+    nextBtn.Size = UDim2.new(1, 0, 0, 24)
+    nextBtn.Text = "Next"
+    styleChip(nextBtn)
+    nextBtn.TextColor3 = Color3.fromRGB(200, 200, 200)
+    nextBtn.Font = Enum.Font.Gotham
+    nextBtn.TextSize = 12
+    nextBtn.Parent = quickMenu
+
+    imageBtn.MouseButton1Click:Connect(function()
+        quickMenu.Visible = not quickMenu.Visible
+    end)
+
+    sendBtn.MouseButton1Click:Connect(function()
+        if quickMenu.Visible then quickMenu.Visible = false end
+    end)
 
     -- Mode toggle
     local function setMode(m)
@@ -810,7 +1155,7 @@ local function buildUI(gui)
         if CURRENT_MODE == "ask" then
             modeBtn.Text = "Ask"
         else
-            modeBtn.Text = "Agent"
+            modeBtn.Text = "Agent ⌘I"
         end
     end
     setMode(CURRENT_MODE)
@@ -823,15 +1168,25 @@ local function buildUI(gui)
     _G.__VECTOR_AUTO = _G.__VECTOR_AUTO or false
     local function setAuto(v)
         _G.__VECTOR_AUTO = v and true or false
-        autoBtn.Text = _G.__VECTOR_AUTO and "Auto ✓" or "Auto"
+        autoToggleBtn.TextColor3 = _G.__VECTOR_AUTO and Color3.fromRGB(120, 210, 160) or Color3.fromRGB(150, 150, 150)
+        autoToggleBtn.Text = _G.__VECTOR_AUTO and "∞✓" or "∞"
     end
     setAuto(_G.__VECTOR_AUTO)
-    autoBtn.MouseButton1Click:Connect(function()
+    autoToggleBtn.MouseButton1Click:Connect(function()
         setAuto(not _G.__VECTOR_AUTO)
     end)
 
-    -- Initialize model label
-    do modelBtn.Text = "server (.env)" end
+    -- Initialize model label + toggle handler
+    local modelIndex = clampModelIndex(_G.__VECTOR_MODEL_INDEX or 1)
+    local function updateModel(idx)
+        modelIndex = ((idx - 1) % #MODEL_OPTIONS) + 1
+        local opt = setModelOverride(modelIndex)
+        modelBtn.Text = opt.label .. " ⌄"
+    end
+    updateModel(modelIndex)
+    modelBtn.MouseButton1Click:Connect(function()
+        updateModel(modelIndex + 1)
+    end)
 
 	-- Status / Plan area (like Cursor). Reflowed below the composer
 	local statusFrame = Instance.new("ScrollingFrame")
@@ -878,15 +1233,21 @@ local function buildUI(gui)
 
     -- Responsive layout function
     local function applyResponsive(width)
-        -- minimal widths tuned for sidebar; hide pieces when narrow
         local w = tonumber(width) or 300
-        retryBtn.Visible = w >= 300
-        nextBtn.Visible = w >= 300
-        chip2.Visible = w >= 280
-        modelBtn.Visible = w >= 280
-        pctChip.Visible = w >= 260
-        -- grow input when very narrow
-        if w < 260 then textBox.Size = UDim2.new(1, 0, 0, 70) else textBox.Size = UDim2.new(1, 0, 0, 90) end
+        local rightSize = (w < 260) and 58 or baseRightWidth
+        rightControls.Size = UDim2.new(0, rightSize, 1, 0)
+        rightControls.Position = UDim2.new(1, 0, 0, 0)
+        leftControls.Size = UDim2.new(1, -(rightSize + 6), 1, 0)
+        chip2.Visible = w >= 260
+        modelBtn.Visible = w >= 240
+        if w < 260 then
+            textBox.Size = UDim2.new(1, 0, 0, 70)
+        else
+            textBox.Size = UDim2.new(1, 0, 0, 90)
+        end
+        if w < 280 and quickMenu.Visible then
+            quickMenu.Visible = false
+        end
         reflow()
     end
 
@@ -913,6 +1274,87 @@ local function buildUI(gui)
     end
 
     -- expose UI handles for outer code + progress updater
+    local function setProgress(p)
+        local v = math.max(0, math.min(100, tonumber(p) or 0))
+        pctLbl.Text = string.format("%.1f%%", v)
+        pctLbl.Visible = v > 0
+        progressFill.Size = UDim2.new(v / 100, 0, 1, 0)
+        stateRow.Visible = true
+    end
+
+    local function renderRuns(runs)
+        for _, child in ipairs(runsRow:GetChildren()) do
+            if child:IsA("Frame") or child:IsA("TextLabel") then child:Destroy() end
+        end
+        if not runs or #runs == 0 then
+            runsRow.Visible = false
+            return
+        end
+        runsRow.Visible = true
+        local function badgeColor(status)
+            if status == "succeeded" then return Color3.fromRGB(60, 140, 90) end
+            if status == "running" then return Color3.fromRGB(70, 110, 170) end
+            if status == "failed" then return Color3.fromRGB(170, 70, 70) end
+            return Color3.fromRGB(90, 90, 90)
+        end
+        for _, run in ipairs(runs) do
+            local badge = Instance.new("Frame")
+            badge.AutomaticSize = Enum.AutomaticSize.X
+            badge.BackgroundTransparency = 0
+            badge.BackgroundColor3 = badgeColor(string.lower(run.status or ""))
+            badge.BorderSizePixel = 0
+            badge.Parent = runsRow
+            local corner = Instance.new("UICorner")
+            corner.CornerRadius = UDim.new(0, 6)
+            corner.Parent = badge
+            local pad = Instance.new("UIPadding")
+            pad.PaddingLeft = UDim.new(0, 10)
+            pad.PaddingRight = UDim.new(0, 10)
+            pad.Parent = badge
+            local label = Instance.new("TextLabel")
+            label.BackgroundTransparency = 1
+            label.Size = UDim2.new(1, 0, 1, 0)
+            label.Font = Enum.Font.Gotham
+            label.TextSize = 11
+            label.TextColor3 = Color3.fromRGB(240, 240, 240)
+            local statusText = string.upper(string.sub(tostring(run.status or ""), 1, 1)) .. string.lower(string.sub(tostring(run.status or ""), 2))
+            label.Text = string.format("%s (%s)", tostring(run.tool or "run"), statusText)
+            label.Parent = badge
+        end
+        stateRow.Visible = true
+    end
+
+    local function setCheckpoint(meta)
+        if not meta then
+            checkpointLabel.Text = "Last checkpoint: (none)"
+            return
+        end
+        local note = meta.lastNote or meta.note or "auto"
+        local createdAt = meta.lastCreatedAt or meta.createdAt
+        local id = meta.lastId or meta.id
+        local timeSuffix = ""
+        if typeof(createdAt) == "number" then
+            local seconds = math.max(0, os.time() - math.floor(createdAt / 1000))
+            if seconds < 60 then
+                timeSuffix = string.format(" · %ds ago", seconds)
+            elseif seconds < 3600 then
+                timeSuffix = string.format(" · %dm ago", math.floor(seconds / 60))
+            else
+                timeSuffix = string.format(" · %dh ago", math.floor(seconds / 3600))
+            end
+        end
+        local text = string.format("Last checkpoint: %s", tostring(note or "auto"))
+        if id then
+            text = text .. string.format(" · %s", tostring(id))
+        end
+        text = text .. timeSuffix
+        if typeof(meta.count) == "number" then
+            text = text .. string.format(" · total %d", meta.count)
+        end
+        checkpointLabel.Text = text
+        stateRow.Visible = true
+    end
+
     local ui = {
         textBox = textBox,
         sendBtn = sendBtn,
@@ -923,10 +1365,13 @@ local function buildUI(gui)
         applyResponsive = applyResponsive,
         reflow = reflow,
         addStatus = uiAddStatus,
-        setProgress = function(p)
-            local v = math.max(0, math.min(100, tonumber(p) or 0))
-            pctLbl.Text = string.format("%.1f%%", v)
-        end,
+        setProgress = setProgress,
+        setRuns = renderRuns,
+        setCheckpoint = setCheckpoint,
+        stateRow = stateRow,
+        snapshotButton = snapshotBtn,
+        restoreButton = restoreBtn,
+        checkpointLabel = checkpointLabel,
     }
     _G.__VECTOR_UI = ui
     return ui
@@ -1016,14 +1461,21 @@ local function renderProposals(list, proposals)
 		snippet.Size = UDim2.new(1, -8, 0, 28)
 		snippet.Position = UDim2.new(0, 8, 0, 30)
 		snippet.TextWrapped = true
-		if p.type == "edit" and p.preview and p.preview.unified then
-			snippet.Text = string.sub(p.preview.unified, 1, 300)
-		elseif p.type == "edit" and p.diff and p.diff.edits and p.diff.edits[1] then
-			snippet.Text = "Insert: " .. string.sub(p.diff.edits[1].text or "", 1, 200)
-		elseif p.type == "object_op" and p.ops and p.ops[1] and p.ops[1].op == "rename_instance" then
-			snippet.Text = "Rename → " .. tostring(p.ops[1].newName)
+		if p.type == "completion" then
+			snippet.Text = tostring(p.summary or "Task complete.")
 		else
-			snippet.Text = p.notes or ""
+			if p.type == "edit" and p.preview and p.preview.unified then
+			snippet.Text = string.sub(p.preview.unified, 1, 300)
+			elseif p.type == "edit" and p.diff and p.diff.edits and p.diff.edits[1] then
+			snippet.Text = "Insert: " .. string.sub(p.diff.edits[1].text or "", 1, 200)
+			elseif p.type == "object_op" and p.ops and p.ops[1] and p.ops[1].op == "rename_instance" then
+			snippet.Text = "Rename → " .. tostring(p.ops[1].newName)
+			else
+				snippet.Text = p.notes or ""
+			end
+		end
+		if p.type == "edit" and p.__conflicts then
+			snippet.Text = "⚠️ Merge conflict detected. Open diff to review hunks."
 		end
 		snippet.Parent = item
 
@@ -1065,7 +1517,22 @@ local function renderProposals(list, proposals)
 		local approveOpen
 		local diffBtn
 		local diffFrame
-		if p.type == "edit" then
+		if p.type == "completion" then
+			approve.Text = "Acknowledge"
+			approve.MouseButton1Click:Connect(function()
+				title.Text = "✅ Completed"
+				-- Create a manual checkpoint to mirror Cline behavior
+				local wf = _G.__VECTOR_LAST_WORKFLOW_ID
+				if wf then
+					ui.addStatus("checkpoint: creating completion snapshot")
+					local ok, checkpoint = createCheckpointRequest(wf, "completion")
+					if ok then ui.addStatus("checkpoint.create ok " .. tostring(checkpoint.id)) end
+				end
+			end)
+			reject.Visible = false
+			if diffBtn then diffBtn.Visible = false end
+			if approveOpen then approveOpen.Visible = false end
+		elseif p.type == "edit" then
 			approveOpen = Instance.new("TextButton")
 			approveOpen.Text = "Apply & Open"
 			approveOpen.Size = UDim2.new(0, 110, 0, 22)
@@ -1091,22 +1558,31 @@ local function renderProposals(list, proposals)
 
 			diffBtn.MouseButton1Click:Connect(function()
 				if not diffFrame.Visible then
-					-- compute and render diff
-					local inst = resolveByFullName(p.path)
-					if not inst then
-						snippet.Text = "Diff error: instance not found"
-						return
+					diffFrame:ClearAllChildren()
+					if p.__conflicts then
+						renderConflictDetails(diffFrame, p.__conflicts)
+					else
+						local primary = getPrimaryFile(p)
+						if not primary or not primary.path then
+							snippet.Text = "Diff error: missing path"
+							return
+						end
+						local inst = resolveByFullName(primary.path)
+						if not inst then
+							snippet.Text = "Diff error: instance not found"
+							return
+						end
+						local okOld, oldText = pcall(function() return ScriptEditorService:GetEditorSource(inst) end)
+						if not okOld then
+							snippet.Text = "Diff error: cannot read source"
+							return
+						end
+						local edits = (primary.diff and primary.diff.edits) or (p.diff and p.diff.edits) or {}
+						local newText = applyRangeEdits(oldText, edits)
+						renderUnifiedDiff(diffFrame, oldText, newText)
 					end
-					local okOld, oldText = pcall(function() return ScriptEditorService:GetEditorSource(inst) end)
-					if not okOld then
-						snippet.Text = "Diff error: cannot read source"
-						return
-					end
-					local newText = applyRangeEdits(oldText, p.diff.edits or {})
-					renderUnifiedDiff(diffFrame, oldText, newText)
 					diffFrame.Visible = true
 					diffBtn.Text = "Close Diff"
-					-- expand item height if needed
 					item.Size = UDim2.new(1, -8, 0, 60 + 180 + 20)
 				else
 					diffFrame.Visible = false
@@ -1117,26 +1593,35 @@ local function renderProposals(list, proposals)
 		end
 
 		local reject = Instance.new("TextButton")
-		reject.Text = "Reject"
+		reject.Text = (p.type == "completion") and "Dismiss" or "Reject"
 		reject.Size = UDim2.new(0, 90, 0, 22)
 		reject.Position = UDim2.new(1, -98, 1, -28)
 		reject.Parent = item
 
 		if approveOpen then
 			approveOpen.MouseButton1Click:Connect(function()
-				local ok, err = applyEditProposal(p)
+				local ok, err, details = applyEditProposal(p)
 				title.Text = (ok and "✅ Applied " or "🔴 Failed ") .. summarizeProposal(p)
-				if ok then openScriptByPath(p.path) else snippet.Text = tostring(err) end
-				reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err, opened = ok })
+				if ok then
+					openScriptByPath(p.path)
+					reportApply(p.id, { ok = true, type = p.type, path = p.path, files = details, opened = true })
+				else
+					snippet.Text = tostring(err)
+					reportApply(p.id, { ok = false, type = p.type, path = p.path, error = err, conflicts = p.__conflicts })
+				end
 			end)
 		end
 
 		approve.MouseButton1Click:Connect(function()
 			if p.type == "edit" then
-				local ok, err = applyEditProposal(p)
+				local ok, err, details = applyEditProposal(p)
 				title.Text = (ok and "✅ Applied " or "🔴 Failed ") .. summarizeProposal(p)
-				if not ok then snippet.Text = tostring(err) end
-				reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
+				if ok then
+					reportApply(p.id, { ok = true, type = p.type, path = p.path, files = details })
+				else
+					snippet.Text = tostring(err)
+					reportApply(p.id, { ok = false, type = p.type, path = p.path, error = err, conflicts = p.__conflicts })
+				end
 			elseif p.type == "object_op" and p.ops then
 				ensurePermissionWithStatus()
 				local appliedAny = false
@@ -1197,6 +1682,8 @@ local function sendChat(projectId, message, ctx, workflowId, opts)
         mode = opts and opts.mode or nil,
         maxTurns = opts and opts.maxTurns or nil,
         enableFallbacks = opts and opts.enableFallbacks or nil,
+        modelOverride = opts and opts.modelOverride or nil,
+        autoApply = opts and opts.autoApply or nil,
     })
     return resp
 end
@@ -1238,6 +1725,43 @@ local function appendStatus(container, text)
         _G.__VECTOR_PROGRESS = math.max(_G.__VECTOR_PROGRESS or 0, bump)
         if _G.__VECTOR_UI and _G.__VECTOR_UI.setProgress then
             _G.__VECTOR_UI.setProgress(_G.__VECTOR_PROGRESS)
+        end
+    end
+
+    local lowerLine = string.lower(line)
+    if string.find(lowerLine, "tool.parsed") or string.find(lowerLine, "tool.valid") or string.find(lowerLine, "tool.result") or string.find(lowerLine, "error.validation") or string.find(lowerLine, "error.provider") then
+        local runs = _G.__VECTOR_RUNS
+        if type(runs) ~= "table" then runs = {}; _G.__VECTOR_RUNS = runs end
+        if string.find(lowerLine, "tool.parsed") then
+            local name = string.match(line, "tool.parsed%s+([%w_%./:-]+)") or "tool"
+            table.insert(runs, { tool = name, status = "running" })
+        elseif string.find(lowerLine, "tool.valid") then
+            if #runs > 0 then runs[#runs].status = "running" end
+        elseif string.find(lowerLine, "tool.result") then
+            if #runs > 0 then runs[#runs].status = "succeeded" end
+        elseif string.find(lowerLine, "error.validation") or string.find(lowerLine, "error.provider") then
+            if #runs > 0 then runs[#runs].status = "failed" end
+        end
+        if _G.__VECTOR_UI and _G.__VECTOR_UI.setRuns then
+            _G.__VECTOR_UI.setRuns(runs)
+        end
+    end
+
+    if string.find(lowerLine, "checkpoint.auto ok") or string.find(lowerLine, "checkpoint.create ok") then
+        local wf = _G.__VECTOR_LAST_WORKFLOW_ID
+        if wf and _G.__VECTOR_UI and _G.__VECTOR_UI.setCheckpoint then
+            task.spawn(function()
+                local okList, entries = listCheckpointsRequest(wf)
+                if okList and type(entries) == "table" and #entries > 0 then
+                    local latest = entries[1]
+                    _G.__VECTOR_UI.setCheckpoint({
+                        lastId = latest.id,
+                        lastNote = latest.note,
+                        lastCreatedAt = latest.createdAt,
+                        count = #entries,
+                    })
+                end
+            end)
         end
     end
 end
@@ -1304,15 +1828,77 @@ local function toggleDock()
 	local lastMessage = ""
 	local lastCtx = nil
 	local lastWorkflowId = nil
+    local lastTaskState = nil
+
+    local function applyTaskStateSnapshot(taskState)
+        if type(taskState) ~= "table" then return end
+        lastTaskState = taskState
+        local runsSnapshot = {}
+        if type(taskState.runs) == "table" then
+            for _, run in ipairs(taskState.runs) do
+                table.insert(runsSnapshot, {
+                    tool = run.tool or "run",
+                    status = string.lower(tostring(run.status or "queued")),
+                })
+            end
+        end
+        _G.__VECTOR_RUNS = runsSnapshot
+        if ui.setRuns then ui.setRuns(runsSnapshot) end
+
+        local progress = 0
+        local total = #runsSnapshot
+        if total > 0 then
+            local done = 0
+            for _, run in ipairs(runsSnapshot) do
+                local status = run.status
+                if status == "succeeded" or status == "failed" then
+                    done += 1
+                end
+            end
+            progress = math.floor((done / total) * 100 + 0.5)
+            if done == total then
+                progress = 100
+            elseif taskState.streaming and taskState.streaming.isStreaming then
+                progress = math.min(progress, 95)
+            end
+        end
+        if ui.setProgress then
+            _G.__VECTOR_PROGRESS = math.max(_G.__VECTOR_PROGRESS or 0, progress)
+            ui.setProgress(_G.__VECTOR_PROGRESS)
+        end
+
+        if ui.setCheckpoint then
+            local cp = taskState.checkpoints or {}
+            local lastId = cp.lastId or taskState.lastCheckpointId
+            if lastId then
+                ui.setCheckpoint({
+                    lastId = lastId,
+                    lastNote = cp.lastNote,
+                    lastCreatedAt = cp.lastCreatedAt,
+                    count = cp.count,
+                })
+            else
+                ui.setCheckpoint(nil)
+            end
+        end
+    end
 
 	-- Auto helpers
 	local function autoApplyProposal(p)
+		local shouldAuto = true
+		if p.meta ~= nil and p.meta.autoApproved ~= nil then
+			shouldAuto = p.meta.autoApproved == true
+		end
+		if not shouldAuto then
+			ui.addStatus("auto.skip (needs approval) " .. tostring(p.notes or p.id or "proposal"))
+			return false
+		end
 		if p.type == "edit" then
 			ui.addStatus("auto.apply edit → " .. (p.path or ""))
 			ensurePermissionWithStatus()
-			local ok, err = applyEditProposal(p)
+			local ok, err, details = applyEditProposal(p)
 			ui.addStatus(ok and "auto.ok" or ("auto.err " .. tostring(err)))
-			reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err })
+			reportApply(p.id, { ok = ok, type = p.type, path = p.path, error = err, files = details, conflicts = p.__conflicts })
 			return ok
 		elseif p.type == "object_op" and p.ops then
 			ensurePermissionWithStatus()
@@ -1345,7 +1931,36 @@ local function toggleDock()
 			end
 			return appliedAny
 		elseif p.type == "asset_op" then
-			ui.addStatus("auto.asset_op (skipped—requires user choice)")
+			if p.insert and p.insert.assetId then
+				local assetId = tonumber(p.insert.assetId)
+				if assetId then
+					ui.addStatus("auto.insert asset " .. tostring(assetId))
+					local ok, modelOrErr = insertAsset(assetId, p.insert.parentPath)
+					if ok then
+						local insertedPath = nil
+						if modelOrErr and typeof(modelOrErr) == "Instance" and modelOrErr.GetFullName then
+							local success, value = pcall(function() return modelOrErr:GetFullName() end)
+							insertedPath = success and value or nil
+						end
+						ui.addStatus("auto.ok asset")
+						reportApply(p.id, { ok = true, type = p.type, op = "insert_asset", assetId = assetId, insertedPath = insertedPath })
+					else
+						local errMsg = tostring(modelOrErr)
+						ui.addStatus("auto.err asset " .. errMsg)
+						reportApply(p.id, { ok = false, type = p.type, op = "insert_asset", assetId = assetId, error = errMsg })
+					end
+					return ok
+				else
+					ui.addStatus("auto.err asset invalid id")
+					reportApply(p.id, { ok = false, type = p.type, op = "insert_asset", error = "invalid_asset_id" })
+				end
+			elseif p.search then
+				ui.addStatus("auto.asset_search skipped (requires user choice)")
+			elseif p.generate3d then
+				ui.addStatus("auto.asset_generate skipped (not supported)")
+			else
+				ui.addStatus("auto.asset_op skipped")
+			end
 			return false
 		end
 		return false
@@ -1361,13 +1976,18 @@ local function toggleDock()
 				ui.addStatus("auto.next step " .. tostring(steps))
 				local followup = "Next step: propose exactly one small, safe action."
 				local mode = CURRENT_MODE
-				local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = nil }
+				local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = getModelOverride(), autoApply = _G.__VECTOR_AUTO }
 				local resp = sendChat("local", followup, { activeScript = getActiveScriptContext(), selection = getSelectionContext() }, workflowId, opts)
 				if not resp.Success then ui.addStatus("auto.http " .. tostring(resp.StatusCode)); break end
 				local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
 				if not ok or parsed.error then ui.addStatus("auto.err invalid json"); break end
 				renderProposals(ui.list, parsed.proposals or {})
-				if parsed.workflowId then startStreamPoller(parsed.workflowId, ui.statusFrame) end
+				if parsed.workflowId then
+					lastWorkflowId = parsed.workflowId
+					_G.__VECTOR_LAST_WORKFLOW_ID = lastWorkflowId
+					startStreamPoller(parsed.workflowId, ui.statusFrame)
+				end
+				if parsed.taskState then applyTaskStateSnapshot(parsed.taskState) end
 				local gotAny = false
 				for _, proposal in ipairs(parsed.proposals or {}) do
 					gotAny = true
@@ -1378,6 +1998,61 @@ local function toggleDock()
 			ui.addStatus("auto.done")
 		end)
 	end
+
+    ui.snapshotButton.MouseButton1Click:Connect(function()
+        if not lastWorkflowId then
+            ui.addStatus("checkpoint.skip (no workflow yet)")
+            return
+        end
+        ui.addStatus("checkpoint: creating manual snapshot")
+        local ok, checkpoint = createCheckpointRequest(lastWorkflowId, "manual")
+        if not ok then
+            ui.addStatus("checkpoint.err " .. tostring(checkpoint))
+            return
+        end
+        ui.addStatus("checkpoint.create ok " .. tostring(checkpoint.id))
+        local listOk, entries = listCheckpointsRequest(lastWorkflowId)
+        local count = listOk and type(entries) == "table" and #entries or nil
+        if ui.setCheckpoint then
+            ui.setCheckpoint({
+                lastId = checkpoint.id,
+                lastNote = checkpoint.note,
+                lastCreatedAt = checkpoint.createdAt,
+                count = count,
+            })
+        end
+    end)
+
+    ui.restoreButton.MouseButton1Click:Connect(function()
+        if not lastWorkflowId then
+            ui.addStatus("checkpoint.restore skip (no workflow)")
+            return
+        end
+        local listOk, entries = listCheckpointsRequest(lastWorkflowId)
+        if not listOk or type(entries) ~= "table" or #entries == 0 then
+            ui.addStatus("checkpoint.restore none available")
+            return
+        end
+        local target = entries[1]
+        ui.addStatus("checkpoint.restore → " .. tostring(target.id))
+        local ok, manifest = restoreCheckpointRequest(target.id, "both")
+        if not ok then
+            ui.addStatus("checkpoint.restore err " .. tostring(manifest))
+            return
+        end
+        ui.addStatus("checkpoint.restore ok " .. tostring(manifest.id))
+        if ui.setCheckpoint then
+            ui.setCheckpoint({
+                lastId = manifest.id,
+                lastNote = manifest.note,
+                lastCreatedAt = manifest.createdAt,
+                count = #entries,
+            })
+        end
+        if manifest.taskState then
+            applyTaskStateSnapshot(manifest.taskState)
+        end
+    end)
 
 	-- Extract send flow so both button and Enter key can trigger it
 	local function runSend()
@@ -1400,7 +2075,8 @@ local function toggleDock()
 			mode = mode,
 			maxTurns = (mode == "ask") and 1 or nil,
 			enableFallbacks = true,
-			modelOverride = nil,
+			modelOverride = getModelOverride(),
+			autoApply = _G.__VECTOR_AUTO,
 		}
 		local resp = sendChat("local", ui.textBox.Text, ctx, nil, opts)
 		if not resp.Success then
@@ -1433,11 +2109,19 @@ local function toggleDock()
 			return
 		end
 		renderProposals(ui.list, parsed.proposals or {})
+		local isComplete = false
+		for _, pr in ipairs(parsed.proposals or {}) do
+			if pr.type == "completion" then isComplete = true break end
+		end
 		if parsed.workflowId then
 			lastWorkflowId = parsed.workflowId
+			_G.__VECTOR_LAST_WORKFLOW_ID = lastWorkflowId
 			startStreamPoller(parsed.workflowId, ui.statusFrame)
 		end
-		if _G.__VECTOR_AUTO then
+		if parsed.taskState then
+			applyTaskStateSnapshot(parsed.taskState)
+		end
+		if _G.__VECTOR_AUTO and not isComplete then
 			for _, proposal in ipairs(parsed.proposals or {}) do autoApplyProposal(proposal) end
 			if parsed.workflowId then maybeAutoContinue(parsed.workflowId) end
 		end
@@ -1473,18 +2157,34 @@ local function toggleDock()
 	ui.retryBtn.MouseButton1Click:Connect(function()
 		if lastMessage == "" then return end
 		-- Re-run same prompt as a new workflow
-		ui.sendBtn.Text = "Sending…"; ui.sendBtn.AutoButtonColor = false
+		local prevText = ui.sendBtn.Text
+		local prevAutoColor = ui.sendBtn.AutoButtonColor
+		ui.sendBtn.AutoButtonColor = false
+		ui.sendBtn.TextTransparency = 0.4
 		local mode = CURRENT_MODE
-		local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = nil }
+		local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = getModelOverride(), autoApply = _G.__VECTOR_AUTO }
 		local resp = sendChat("local", lastMessage, lastCtx, nil, opts)
-		ui.sendBtn.Text = "Send"; ui.sendBtn.AutoButtonColor = true
+		ui.sendBtn.Text = prevText
+		ui.sendBtn.AutoButtonColor = prevAutoColor
+		ui.sendBtn.TextTransparency = 0
 		if not resp.Success then return end
 		local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
 		if not ok or parsed.error then return end
 		renderProposals(ui.list, parsed.proposals or {})
+		-- Stop auto-continue if completion proposal is present
+		local hasCompletion = false
+		for _, pr in ipairs(parsed.proposals or {}) do
+			if pr.type == "completion" then hasCompletion = true break end
+		end
 		if parsed.workflowId then
 			lastWorkflowId = parsed.workflowId
+			_G.__VECTOR_LAST_WORKFLOW_ID = lastWorkflowId
 			startStreamPoller(parsed.workflowId, ui.statusFrame)
+		end
+		if parsed.taskState then applyTaskStateSnapshot(parsed.taskState) end
+		if not hasCompletion then
+			for _, proposal in ipairs(parsed.proposals or {}) do autoApplyProposal(proposal) end
+			if parsed.workflowId then maybeAutoContinue(parsed.workflowId) end
 		end
 	end)
 
@@ -1493,7 +2193,7 @@ local function toggleDock()
 		-- Ask the backend to continue with the next atomic step on the same workflow
 		local followup = "Next step: propose exactly one small, safe action."
 		local mode = CURRENT_MODE
-		local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = nil }
+		local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = getModelOverride(), autoApply = _G.__VECTOR_AUTO }
 		local resp = sendChat("local", followup, {
 			activeScript = getActiveScriptContext(),
 			selection = getSelectionContext(),
@@ -1502,9 +2202,17 @@ local function toggleDock()
 		local ok, parsed = pcall(function() return HttpService:JSONDecode(resp.Body) end)
 		if not ok or parsed.error then return end
 		renderProposals(ui.list, parsed.proposals or {})
+		-- Stop auto-continue if completion proposal is present
+		local hasCompletion = false
+		for _, pr in ipairs(parsed.proposals or {}) do
+			if pr.type == "completion" then hasCompletion = true break end
+		end
 		if parsed.workflowId then
+			lastWorkflowId = parsed.workflowId
+			_G.__VECTOR_LAST_WORKFLOW_ID = lastWorkflowId
 			startStreamPoller(parsed.workflowId, ui.statusFrame)
 		end
+		if parsed.taskState then applyTaskStateSnapshot(parsed.taskState) end
 	end)
 end
 

@@ -1,27 +1,53 @@
 export type EditPos = { line: number; character: number }
 export type Edit = { start: EditPos; end: EditPos; text: string }
-export type EditProposal = {
-  id: string
-  type: 'edit'
+
+type ProposalMeta = { meta?: { autoApproved?: boolean } }
+
+export type EditAnchors = {
+  startLineText?: string
+  endLineText?: string
+}
+
+export type EditFileChange = {
   path: string
   diff: { mode: 'rangeEDITS'; edits: Edit[] }
+  preview?: { unified?: string; before?: string; after?: string }
+  safety?: { beforeHash?: string; baseText?: string; anchors?: EditAnchors }
+}
+
+export type EditProposal = ProposalMeta & {
+  id: string
+  type: 'edit'
+  files: EditFileChange[]
   notes?: string
-  safety?: { beforeHash?: string }
+  /**
+   * Deprecated single-file fields kept for backward compatibility. Always mirrors `files[0]`.
+   */
+  path?: string
+  diff?: EditFileChange['diff']
+  preview?: EditFileChange['preview']
+  safety?: EditFileChange['safety']
 }
 export type ObjectOp =
   | { op: 'create_instance'; className: string; parentPath: string; props?: Record<string, unknown> }
   | { op: 'set_properties'; path: string; props: Record<string, unknown> }
   | { op: 'rename_instance'; path: string; newName: string }
   | { op: 'delete_instance'; path: string }
-export type ObjectProposal = { id: string; type: 'object_op'; ops: ObjectOp[]; notes?: string }
-export type AssetProposal = {
+export type ObjectProposal = ProposalMeta & { id: string; type: 'object_op'; ops: ObjectOp[]; notes?: string }
+export type AssetProposal = ProposalMeta & {
   id: string
   type: 'asset_op'
   search?: { query: string; tags?: string[]; limit?: number }
   insert?: { assetId: number; parentPath?: string }
   generate3d?: { prompt: string; tags?: string[]; style?: string; budget?: number }
 }
-export type Proposal = EditProposal | ObjectProposal | AssetProposal
+export type CompletionProposal = ProposalMeta & {
+  id: string
+  type: 'completion'
+  summary: string
+  confidence?: number
+}
+export type Proposal = EditProposal | ObjectProposal | AssetProposal | CompletionProposal
 
 export type ChatInput = {
   projectId: string
@@ -33,6 +59,8 @@ export type ChatInput = {
     openDocs?: { path: string }[]
   }
   provider?: { name: 'openrouter'; apiKey: string; model?: string; baseUrl?: string }
+  modelOverride?: string | null
+  autoApply?: boolean
   mode?: 'ask' | 'agent'
   maxTurns?: number
   enableFallbacks?: boolean
@@ -46,6 +74,24 @@ function sanitizeComment(text: string): string {
   return text.replace(/\n/g, ' ').slice(0, 160)
 }
 
+function computeAnchors(baseText: string, edits: Edit[]): EditAnchors {
+  if (!edits || edits.length === 0) return {}
+  const lines = baseText.split('\n')
+  const first = edits[0]
+  const last = edits[edits.length - 1]
+  const startIdx = Math.max(0, Math.min(first.start.line, lines.length - 1))
+  let endIdx = last.end.line ?? first.start.line
+  if (last.end.character === 0 && endIdx > first.start.line) {
+    endIdx -= 1
+  }
+  if (endIdx < first.start.line) endIdx = first.start.line
+  endIdx = Math.max(0, Math.min(endIdx, lines.length - 1))
+  return {
+    startLineText: lines[startIdx] ?? '',
+    endLineText: lines[endIdx] ?? lines[startIdx] ?? '',
+  }
+}
+
 // Provider call
 import { callOpenRouter } from './providers/openrouter'
 import { z } from 'zod'
@@ -54,6 +100,10 @@ import { getSession, setLastTool } from '../store/sessions'
 import { pushChunk } from '../store/stream'
 import { applyRangeEdits, simpleUnifiedDiff } from '../diff/rangeEdits'
 import crypto from 'node:crypto'
+import { TaskState, getTaskState as loadTaskState, updateTaskState } from './taskState'
+import { extractMentions } from '../context/mentions'
+import { listCodeDefinitionNames, searchFiles } from '../tools/codeIntel'
+import { annotateAutoApproval } from './autoApprove'
 
 const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
 
@@ -75,8 +125,9 @@ Encoding for parameters
 - If a parameter is optional and unknown, omit the tag entirely (do NOT write "null" or "undefined").
 
 Available tools
-- Context (read-only): get_active_script(), list_selection(), list_open_documents().
+- Context (read-only): get_active_script(), list_selection(), list_open_documents(maxCount?), list_code_definition_names(root?,limit?,exts?), search_files(query,root?,limit?,exts?,caseSensitive?).
 - Actions: show_diff(path,edits[]), apply_edit(path,edits[]), create_instance(className,parentPath,props?), set_properties(path,props), rename_instance(path,newName), delete_instance(path), search_assets(query,tags?,limit?), insert_asset(assetId,parentPath?), generate_asset_3d(prompt,tags?,style?,budget?).
+- Completion: complete(summary,confidence?) or attempt_completion(result,confidence?) — must be called when the task is finished to present the result.
 
 Paths & names
 - Use canonical GetFullName() paths, e.g., game.Workspace.Model.Part.
@@ -103,6 +154,9 @@ Context & defaults
 - If parentPath is unknown for create_instance/insert_asset, use game.Workspace.
 - Only set real properties for the target class; do not create instances via set_properties.
 
+Mentions
+- Users may attach context via '@file path/to/file', '@folder path/to/folder', '@url https://…', or '@problems' to load diagnostic logs. These appear in the conversation history—use them before requesting additional context.
+
 Modes
 - Ask: do exactly one atomic change.
 - Agent: fetch minimal context if needed, then act with one tool.
@@ -115,6 +169,7 @@ Assets & 3D
 
 Validation & recovery
 - On VALIDATION_ERROR, resubmit the SAME tool once with corrected args; no commentary and no tool switching.
+- If you return with no tool call, you MUST either choose exactly one tool or call complete(summary) to finish.
 
 Selection defaults
 - If EXACTLY ONE instance is selected and it is a reasonable container, prefer it by default:
@@ -246,13 +301,53 @@ function toEditArray(editsRaw: any): Edit[] | null {
   return out
 }
 
-function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInput, msg: string): Proposal[] {
+type MapResult = { proposals: Proposal[]; missingContext?: string }
+
+function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInput, msg: string): MapResult {
   const proposals: Proposal[] = []
   const ensurePath = (fallback?: string | null): string | undefined => {
     const p = typeof a.path === 'string' ? a.path : undefined
     return p || (fallback || undefined)
   }
   if (name === 'show_diff' || name === 'apply_edit') {
+    if (Array.isArray((a as any).files) && (a as any).files.length > 0) {
+      const fileChanges: EditFileChange[] = []
+      for (const entry of (a as any).files as any[]) {
+        if (!entry || typeof entry.path !== 'string') continue
+        const edits = toEditArray(entry.edits)
+        if (!edits) continue
+        const baseText: string | undefined = typeof entry.baseText === 'string'
+          ? entry.baseText
+          : entry.path === input.context.activeScript?.path
+            ? input.context.activeScript?.text || ''
+            : undefined
+        if (typeof baseText !== 'string') continue
+        const proposed = applyRangeEdits(baseText, edits)
+        const unified = simpleUnifiedDiff(baseText, proposed, entry.path)
+        const beforeHash = crypto.createHash('sha1').update(baseText).digest('hex')
+        fileChanges.push({
+          path: entry.path,
+          diff: { mode: 'rangeEDITS', edits },
+          preview: { unified },
+          safety: { beforeHash, baseText, anchors: computeAnchors(baseText, edits) },
+        })
+      }
+      if (fileChanges.length) {
+        const primary = fileChanges[0]
+        proposals.push({
+          id: id('edit'),
+          type: 'edit',
+          files: fileChanges,
+          path: primary.path,
+          diff: primary.diff,
+          preview: primary.preview,
+          safety: primary.safety,
+          notes: `Parsed from ${name}`,
+        } as EditProposal)
+        return { proposals }
+      }
+    }
+
     const path = ensurePath(input.context.activeScript?.path || null)
     const edits = toEditArray((a as any).edits)
     if (path && edits) {
@@ -260,67 +355,157 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
       const next = applyRangeEdits(old, edits)
       const unified = simpleUnifiedDiff(old, next, path)
       const beforeHash = crypto.createHash('sha1').update(old).digest('hex')
-      proposals.push({ id: id('edit'), type: 'edit', path, notes: `Parsed from ${name}`, diff: { mode: 'rangeEDITS', edits }, preview: { unified }, safety: { beforeHash } } as any)
-      return proposals
+      const fileChange: EditFileChange = {
+        path,
+        diff: { mode: 'rangeEDITS', edits },
+        preview: { unified },
+        safety: { beforeHash, baseText: old, anchors: computeAnchors(old, edits) },
+      }
+      proposals.push({
+        id: id('edit'),
+        type: 'edit',
+        files: [fileChange],
+        notes: `Parsed from ${name}`,
+        path,
+        diff: fileChange.diff,
+        preview: fileChange.preview,
+        safety: fileChange.safety,
+      } as EditProposal as any)
+      return { proposals }
     }
+    if (!path) return { proposals, missingContext: 'Need active script (auto-open the relevant Script).' }
+    if (!edits) return { proposals, missingContext: 'Need edit payload with valid ranges.' }
   }
   if (name === 'create_instance') {
     const parentPath: string | undefined = (a as any).parentPath
     if (typeof (a as any).className === 'string' && parentPath) {
       const op: ObjectOp = { op: 'create_instance', className: (a as any).className, parentPath, props: (a as any).props }
       proposals.push({ id: id('obj'), type: 'object_op', ops: [op], notes: 'Parsed from create_instance' })
-      return proposals
+      return { proposals }
     }
+    if (!parentPath) return { proposals, missingContext: 'Need parent selection to create instance.' }
   }
   if (name === 'set_properties') {
     if (typeof (a as any).path === 'string' && (a as any).props && typeof (a as any).props === 'object') {
       const op: ObjectOp = { op: 'set_properties', path: (a as any).path, props: (a as any).props }
       proposals.push({ id: id('obj'), type: 'object_op', ops: [op], notes: 'Parsed from set_properties' })
-      return proposals
+      return { proposals }
     }
+    return { proposals, missingContext: 'Need selected instance to set properties.' }
   }
   if (name === 'rename_instance') {
     const path = ensurePath()
     if (path && typeof (a as any).newName === 'string') {
       proposals.push({ id: id('obj'), type: 'object_op', ops: [{ op: 'rename_instance', path, newName: (a as any).newName }], notes: 'Parsed from rename_instance' })
-      return proposals
+      return { proposals }
     }
+    return { proposals, missingContext: 'Need selected instance to rename.' }
   }
   if (name === 'delete_instance') {
     // Use selection-derived defaults when available
     const path = ensurePath(input.context.selection && input.context.selection.length === 1 ? input.context.selection[0].path : undefined)
     if (path) {
       // Guard: avoid destructive deletes at DataModel or Services level
-      if (/^game(\.[A-Za-z]+Service|\.DataModel)?$/.test(path)) return proposals
+      if (/^game(\.[A-Za-z]+Service|\.DataModel)?$/.test(path)) return { proposals }
       proposals.push({ id: id('obj'), type: 'object_op', ops: [{ op: 'delete_instance', path }], notes: 'Parsed from delete_instance' })
-      return proposals
+      return { proposals }
     }
+    return { proposals, missingContext: 'Need selected instance to delete.' }
   }
   if (name === 'search_assets') {
     const query = typeof (a as any).query === 'string' ? (a as any).query : (msg || 'button')
     const tags = Array.isArray((a as any).tags) ? (a as any).tags.map(String) : undefined
     const limit = typeof (a as any).limit === 'number' ? (a as any).limit : 6
     proposals.push({ id: id('asset'), type: 'asset_op', search: { query, tags, limit } })
-    return proposals
+    return { proposals }
   }
   if (name === 'insert_asset') {
     const assetId = typeof (a as any).assetId === 'number' ? (a as any).assetId : Number((a as any).assetId)
     if (!isNaN(assetId)) {
       proposals.push({ id: id('asset'), type: 'asset_op', insert: { assetId, parentPath: typeof (a as any).parentPath === 'string' ? (a as any).parentPath : undefined } })
-      return proposals
+      return { proposals }
     }
+    return { proposals, missingContext: 'Need assetId to insert asset.' }
   }
   if (name === 'generate_asset_3d') {
     if (typeof (a as any).prompt === 'string') {
       proposals.push({ id: id('asset'), type: 'asset_op', generate3d: { prompt: (a as any).prompt, tags: Array.isArray((a as any).tags) ? (a as any).tags.map(String) : undefined, style: typeof (a as any).style === 'string' ? (a as any).style : undefined, budget: typeof (a as any).budget === 'number' ? (a as any).budget : undefined } })
-      return proposals
+      return { proposals }
     }
   }
-  return proposals
+  if (name === 'complete') {
+    const summary = typeof (a as any).summary === 'string' ? (a as any).summary : undefined
+    const confidence = typeof (a as any).confidence === 'number' ? (a as any).confidence : undefined
+    if (summary && summary.trim().length > 0) {
+      proposals.push({ id: id('done'), type: 'completion', summary, confidence })
+      return { proposals }
+    }
+  }
+  if (name === 'attempt_completion') {
+    const result = typeof (a as any).result === 'string' ? (a as any).result : undefined
+    const confidence = typeof (a as any).confidence === 'number' ? (a as any).confidence : undefined
+    if (result && result.trim().length > 0) {
+      proposals.push({ id: id('done'), type: 'completion', summary: result, confidence })
+      return { proposals }
+    }
+  }
+  return { proposals }
 }
 
-export async function runLLM(input: ChatInput): Promise<Proposal[]> {
-  const msg = input.message.trim()
+export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[]; taskState: TaskState }> {
+  const rawMessage = input.message.trim()
+  const { cleaned, attachments } = await extractMentions(rawMessage)
+  const msg = cleaned.length > 0 ? cleaned : rawMessage
+  const modelOverride = typeof input.modelOverride === 'string' && input.modelOverride.trim().length > 0
+    ? input.modelOverride.trim()
+    : undefined
+  const autoEnabled = !!(input as any).autoApply
+
+  const taskId = (input as any).workflowId || input.projectId
+  let taskState = loadTaskState(taskId)
+  const updateState = (fn: (state: TaskState) => void) => {
+    taskState = updateTaskState(taskId, fn)
+    return taskState
+  }
+  const appendHistory = (role: 'user' | 'assistant' | 'system', content: string) => {
+    updateState((state) => {
+      state.history.push({ role, content, at: Date.now() })
+      if (role === 'user') state.counters.tokensIn += content.length
+      if (role === 'assistant') state.counters.tokensOut += content.length
+      const MAX_HISTORY = 40
+      const KEEP_RECENT = 20
+      if (state.history.length > MAX_HISTORY) {
+        const removed = state.history.splice(0, state.history.length - KEEP_RECENT)
+        const summary = removed
+          .map((entry) => `[${entry.role}] ${entry.content.replace(/\s+/g, ' ').slice(0, 160)}`)
+          .join('\n')
+        state.history.unshift({ role: 'system', content: `Summary of earlier conversation (trimmed):\n${summary.slice(0, 2000)}`, at: removed[0]?.at || Date.now() })
+      }
+    })
+  }
+
+  appendHistory('user', msg)
+  attachments.forEach((att) => {
+    appendHistory('system', `[attachment:${att.type}] ${att.label}\n${att.content}`)
+  })
+  updateState((state) => {
+    state.autoApproval.enabled = autoEnabled
+    state.autoApproval.readFiles = autoEnabled
+    state.autoApproval.editFiles = autoEnabled
+    state.autoApproval.execSafe = autoEnabled
+    if (typeof state.counters.contextRequests !== 'number') state.counters.contextRequests = 0
+  })
+
+  const attachmentSummary = attachments.length
+    ? attachments
+        .map((att) => `[${att.type}] ${att.label}\n${att.content}`)
+        .join('\n---\n')
+    : ''
+  const providerFirstMessage = attachments.length ? `${msg}\n\n[ATTACHMENTS]\n${attachmentSummary}` : msg
+
+  const contextRequestLimit = 1
+  let contextRequestsThisCall = 0
+  let requestAdditionalContext: (reason: string) => boolean = () => false
 
   // Selection‑aware defaults
   const selPath = input.context.selection && input.context.selection.length === 1
@@ -332,8 +517,25 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
   const providerRequested = !!(input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey)
   const useProvider = providerRequested || process.env.VECTOR_USE_OPENROUTER === '1'
   const streamKey = (input as any).workflowId || input.projectId
-  pushChunk(streamKey, `orchestrator.start provider=${useProvider ? 'openrouter' : 'fallback'} mode=${input.mode || 'agent'}`)
-  console.log(`[orch] start provider=${useProvider ? 'openrouter' : 'fallback'} mode=${input.mode || 'agent'} msgLen=${msg.length}`)
+  const startLog = `provider=${useProvider ? 'openrouter' : 'fallback'} mode=${input.mode || 'agent'} model=${modelOverride || input.provider?.model || 'default'}`
+  pushChunk(streamKey, `orchestrator.start ${startLog}`)
+  console.log(`[orch] start ${startLog} msgLen=${msg.length}`)
+
+  const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState } => {
+    const annotated = annotateAutoApproval(list, { autoEnabled })
+    const totalsIn = taskState.counters.tokensIn
+    const totalsOut = taskState.counters.tokensOut
+    pushChunk(streamKey, `telemetry.tokens in=${totalsIn} out=${totalsOut}`)
+    console.log(`[tokens] workflow=${taskId} in=${totalsIn} out=${totalsOut}`)
+    updateState((state) => {
+      state.streaming.isStreaming = false
+    })
+    if (annotated.some((p) => p.type === 'completion')) {
+      pushChunk(streamKey, 'completed: model_complete')
+      // Optional: checkpoint marker could be added here if we had a server-side checkpoint manager
+    }
+    return { proposals: annotated, taskState }
+  }
 
   // Deterministic templates for milestone verification
   const lower = msg.toLowerCase()
@@ -360,14 +562,14 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
         ], `Create ${name}`)
       }
     }
-    return proposals
+    appendHistory('assistant', 'template: 3x3 grid')
+    return finalize(proposals)
   }
   if (/\bfarming\b/.test(lower)) {
     const parent = 'game.Workspace'
     addObj([{ op: 'create_instance', className: 'Model', parentPath: parent, props: { Name: 'Farm' } }], 'Create Farm model')
     const basePath = 'game.Workspace.Farm'
     addObj([{ op: 'create_instance', className: 'Part', parentPath: basePath, props: { Name: 'FarmBase', Anchored: true, Size: { x: 40, y: 1, z: 40 }, CFrame: { x: 0, y: 0.5, z: 0 } } }], 'Create Farm base')
-    // 4x4 soil grid = 16 steps including farm+base above → add 14 more
     const coords = [-12, -4, 4, 12]
     let count = 0
     for (let i = 0; i < 4; i++) {
@@ -381,10 +583,10 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
       }
       if (count >= 14) break
     }
-    return proposals
+    appendHistory('assistant', 'template: farming kit')
+    return finalize(proposals)
   }
 
-  // Helper: build tool XML from name/args (for assistant history)
   const toXml = (name: string, args: Record<string, any>): string => {
     const parts: string[] = [`<${name}>`]
     for (const [k, v] of Object.entries(args || {})) {
@@ -395,7 +597,6 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
     return parts.join('\n')
   }
 
-  // Multi-turn Plan/Act loop
   if (useProvider) {
     const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
     const maxTurns = Number(
@@ -405,60 +606,104 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
           ? 1
           : defaultMaxTurns,
     )
-    const messages: { role: 'user' | 'assistant'; content: string }[] = [{ role: 'user', content: msg }]
+    const messages: { role: 'user' | 'assistant'; content: string }[] = [{ role: 'user', content: providerFirstMessage }]
     const validationRetryLimit = 2
     const unknownToolRetryLimit = 1
     let unknownToolRetries = 0
     let consecutiveValidationErrors = 0
 
+    requestAdditionalContext = (reason: string): boolean => {
+      if (contextRequestsThisCall >= contextRequestLimit) return false
+      contextRequestsThisCall += 1
+      const ask = `CONTEXT_REQUEST ${reason}. Please fetch the relevant context (e.g., run get_active_script or list_selection) before continuing.`
+      messages.push({ role: 'user', content: ask })
+      appendHistory('system', ask)
+      updateState((state) => {
+        state.counters.contextRequests += 1
+      })
+      return true
+    }
+
     for (let turn = 0; turn < maxTurns; turn++) {
+      const runId = id('run')
+      const startedAt = Date.now()
+      updateState((state) => {
+        state.streaming.isStreaming = true
+        state.runs.push({ id: runId, tool: 'provider.call', input: { model: input.provider?.model || modelOverride }, status: 'running', startedAt })
+      })
+
       let content = ''
       try {
         const resp = await callOpenRouter({
           systemPrompt: SYSTEM_PROMPT,
           messages: messages as any,
-          model: input.provider?.model,
+          model: input.provider?.model || modelOverride,
           apiKey: input.provider?.apiKey,
           baseUrl: input.provider?.baseUrl,
         })
         content = resp.content || ''
         pushChunk(streamKey, `provider.response turn=${turn} chars=${content.length}`)
         console.log(`[orch] provider.ok turn=${turn} contentLen=${content.length}`)
+        updateState((state) => {
+          const run = state.runs.find((r) => r.id === runId)
+          if (run) {
+            run.status = 'succeeded'
+            run.endedAt = Date.now()
+          }
+          state.streaming.isStreaming = false
+        })
+        appendHistory('assistant', content)
       } catch (e: any) {
         pushChunk(streamKey, `error.provider ${e?.message || 'unknown'}`)
         console.error(`[orch] provider.error ${e?.message || 'unknown'}`)
+        updateState((state) => {
+          const run = state.runs.find((r) => r.id === runId)
+          if (run) {
+            run.status = 'failed'
+            run.endedAt = Date.now()
+            run.error = { message: e?.message || 'unknown' }
+          }
+          state.streaming.isStreaming = false
+        })
         if (providerRequested) throw new Error(`Provider error: ${e?.message || 'unknown'}`)
         break
       }
 
       const tool = parseToolXML(content)
       if (!tool) {
-        pushChunk(streamKey, 'error.validation no tool call parsed')
-        console.warn('[orch] parse.warn no tool call parsed')
-        if (providerRequested) throw new Error('Provider returned no parseable tool call')
-        break
+        // Enforce no-text-only turns: nudge to choose a tool or complete
+        const hint = 'NO_TOOL_USED Please emit exactly one tool or call <complete><summary>…</summary></complete> to finish.'
+        messages.push({ role: 'user', content: hint })
+        appendHistory('system', hint)
+        pushChunk(streamKey, 'error.validation no tool call parsed (nudged continue)')
+        console.warn('[orch] parse.warn no tool call parsed; nudging to tool or complete')
+        // Continue loop (do not break) unless provider was hard requested and keeps failing
+        if (providerRequested) {
+          // allow it to retry within the same loop
+        }
+        continue
       }
 
       const name = tool.name as keyof typeof Tools | string
       let a: Record<string, any> = tool.args || {}
+      const toolXml = toXml(String(name), a)
+      appendHistory('assistant', toolXml)
       pushChunk(streamKey, `tool.parsed ${String(name)}`)
       console.log(`[orch] tool.parsed name=${String(name)}`)
 
-  // Infer missing fields from context (e.g., path)
-  if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
-    a = { ...a, path: input.context.activeScript.path }
-  }
-  if ((name === 'rename_instance' || name === 'set_properties' || name === 'delete_instance') && !a.path && selPath) {
-    a = { ...a, path: selPath }
-  }
-  if (name === 'create_instance' && !('parentPath' in a)) {
-    a = { ...a, parentPath: selIsContainer ? selPath! : 'game.Workspace' }
-  }
-  if (name === 'insert_asset' && !('parentPath' in a)) {
-    a = { ...a, parentPath: selIsContainer ? selPath! : 'game.Workspace' }
-  }
+      if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
+        a = { ...a, path: input.context.activeScript.path }
+      }
+      if ((name === 'rename_instance' || name === 'set_properties' || name === 'delete_instance') && !a.path && selPath) {
+        a = { ...a, path: selPath }
+      }
+      if (name === 'create_instance' && !('parentPath' in a)) {
+        a = { ...a, parentPath: selIsContainer ? selPath! : 'game.Workspace' }
+      }
+      if (name === 'insert_asset' && !('parentPath' in a)) {
+        a = { ...a, parentPath: selIsContainer ? selPath! : 'game.Workspace' }
+      }
 
-  // Validate if known tool
       const schema = (Tools as any)[name as any] as z.ZodTypeAny | undefined
       if (schema) {
         const parsed = schema.safeParse(a)
@@ -467,9 +712,10 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
           const errMsg = parsed.error?.errors?.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ') || 'invalid arguments'
           pushChunk(streamKey, `error.validation ${String(name)} ${errMsg}`)
           console.warn(`[orch] validation.error tool=${String(name)} ${errMsg}`)
-          // Reflect error verbatim and retry (up to limit)
-          messages.push({ role: 'assistant', content: toXml(String(name), a) })
-          messages.push({ role: 'user', content: `VALIDATION_ERROR ${String(name)}\n${errMsg}` })
+          const validationContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
+          messages.push({ role: 'assistant', content: toolXml })
+          messages.push({ role: 'user', content: validationContent })
+          appendHistory('system', validationContent)
           if (consecutiveValidationErrors > validationRetryLimit) {
             throw new Error(`Validation failed repeatedly for ${String(name)}: ${errMsg}`)
           }
@@ -482,16 +728,33 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
         }
       }
 
-      // Context tools: execute locally, feed result back, and continue
-      const isContextTool = name === 'get_active_script' || name === 'list_selection' || name === 'list_open_documents'
+      const isContextTool =
+        name === 'get_active_script' ||
+        name === 'list_selection' ||
+        name === 'list_open_documents' ||
+        name === 'list_code_definition_names' ||
+        name === 'search_files'
       if (isContextTool) {
         const result = name === 'get_active_script'
           ? (input.context.activeScript || null)
           : name === 'list_selection'
             ? (input.context.selection || [])
-            : (input.context.openDocs || [])
+            : name === 'list_open_documents'
+              ? (input.context.openDocs || [])
+              : name === 'list_code_definition_names'
+                ? listCodeDefinitionNames({
+                    root: typeof (a as any).root === 'string' ? (a as any).root : undefined,
+                    limit: typeof (a as any).limit === 'number' ? (a as any).limit : undefined,
+                    exts: Array.isArray((a as any).exts) ? (a as any).exts.map(String) : undefined,
+                  })
+                : searchFiles({
+                    query: String((a as any).query ?? ''),
+                    root: typeof (a as any).root === 'string' ? (a as any).root : undefined,
+                    limit: typeof (a as any).limit === 'number' ? (a as any).limit : undefined,
+                    exts: Array.isArray((a as any).exts) ? (a as any).exts.map(String) : undefined,
+                    caseSensitive: !!(a as any).caseSensitive,
+                  })
 
-        // Avoid pushing extremely large buffers
         const safeResult = name === 'get_active_script' && result && typeof (result as any).text === 'string'
           ? { ...(result as any), text: ((result as any).text as string).slice(0, 40000) }
           : result
@@ -499,38 +762,50 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
         setLastTool(input.projectId, String(name), safeResult)
         pushChunk(streamKey, `tool.result ${String(name)}`)
 
-        // Append assistant tool call and user tool result to the conversation
-        messages.push({ role: 'assistant', content: toXml(String(name), a) })
-        messages.push({ role: 'user', content: `TOOL_RESULT ${String(name)}\n` + JSON.stringify(safeResult) })
+        messages.push({ role: 'assistant', content: toolXml })
+        const resultContent = `TOOL_RESULT ${String(name)}\n` + JSON.stringify(safeResult)
+        messages.push({ role: 'user', content: resultContent })
+        appendHistory('system', resultContent)
+        updateState((state) => {
+          const ts = Date.now()
+          state.runs.push({ id: id('run'), tool: String(name), input: a, status: 'succeeded', startedAt: ts, endedAt: ts })
+        })
         continue
       }
 
-      // Non-context tools → map to proposals and return
       const mapped = mapToolToProposals(String(name), a, input, msg)
-      if (mapped.length) {
-        pushChunk(streamKey, `proposals.mapped ${String(name)} count=${mapped.length}`)
-        console.log(`[orch] proposals.mapped tool=${String(name)} count=${mapped.length}`)
-        return mapped
+      if (mapped.proposals.length) {
+        pushChunk(streamKey, `proposals.mapped ${String(name)} count=${mapped.proposals.length}`)
+        console.log(`[orch] proposals.mapped tool=${String(name)} count=${mapped.proposals.length}`)
+        return finalize(mapped.proposals)
+      }
+      if (mapped.missingContext) {
+        const requested = requestAdditionalContext(mapped.missingContext)
+        if (requested) {
+          updateState((state) => {
+            state.streaming.isStreaming = false
+          })
+          continue
+        }
       }
 
-      // Unknown tool: reflect error and allow a limited retry
       if (!(Tools as any)[name as any]) {
         unknownToolRetries++
         const errMsg = `Unknown tool: ${String(name)}`
         pushChunk(streamKey, `error.validation ${errMsg}`)
         console.warn(`[orch] unknown.tool ${String(name)}`)
-        messages.push({ role: 'assistant', content: toXml(String(name), a) })
-        messages.push({ role: 'user', content: `VALIDATION_ERROR ${String(name)}\n${errMsg}` })
+        messages.push({ role: 'assistant', content: toolXml })
+        const errorContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
+        messages.push({ role: 'user', content: errorContent })
+        appendHistory('system', errorContent)
         if (unknownToolRetries > unknownToolRetryLimit) break
         continue
       }
 
-      // Otherwise break to fallbacks
       break
     }
   }
 
-  // Fallbacks: safe, deterministic proposals without provider parsing
   const fallbacksEnabled = typeof (input as any).enableFallbacks === 'boolean'
     ? (input as any).enableFallbacks
     : (process.env.VECTOR_DISABLE_FALLBACKS || '0') !== '1'
@@ -542,39 +817,50 @@ export async function runLLM(input: ChatInput): Promise<Proposal[]> {
     const old = input.context.activeScript.text
     const next = applyRangeEdits(old, edits)
     const unified = simpleUnifiedDiff(old, next, path)
+    const beforeHash = crypto.createHash('sha1').update(old).digest('hex')
     pushChunk(streamKey, 'fallback.edit commentTop')
     console.log('[orch] fallback.edit inserting comment at top')
-    return [{
-      id: id('edit'),
-      type: 'edit',
+    appendHistory('assistant', 'fallback: insert comment at top')
+    const fileChange: EditFileChange = {
       path,
-      notes: 'Insert a comment at the top as a placeholder for an edit.',
       diff: { mode: 'rangeEDITS', edits },
       preview: { unified },
-      safety: { beforeHash: (require('node:crypto') as typeof import('node:crypto')).createHash('sha1').update(old).digest('hex') },
-    } as any]
+      safety: { beforeHash, baseText: old, anchors: computeAnchors(old, edits) },
+    }
+    return finalize([
+      {
+        id: id('edit'),
+        type: 'edit',
+        files: [fileChange],
+        path,
+        diff: fileChange.diff,
+        preview: fileChange.preview,
+        safety: fileChange.safety,
+        notes: 'Insert a comment at the top as a placeholder for an edit.',
+      } as EditProposal,
+    ])
   }
 
   if (!fallbacksDisabled && input.context.selection && input.context.selection.length > 0) {
     const first = input.context.selection[0]
     pushChunk(streamKey, `fallback.object rename ${first.path}`)
     console.log(`[orch] fallback.object rename path=${first.path}`)
-    return [
+    appendHistory('assistant', `fallback: rename ${first.path}`)
+    return finalize([
       {
         id: id('obj'),
         type: 'object_op',
         notes: 'Rename selected instance by appending _Warp',
         ops: [{ op: 'rename_instance', path: first.path, newName: `${first.path.split('.').pop() || 'Instance'}_Warp` }],
       },
-    ]
+    ])
   }
 
   if (!fallbacksDisabled) {
     pushChunk(streamKey, 'fallback.asset search')
     console.log('[orch] fallback.asset search')
-    return [
-      { id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } },
-    ]
+    appendHistory('assistant', 'fallback: asset search')
+    return finalize([{ id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } }])
   }
   throw new Error('No actionable tool produced within turn limit')
 }

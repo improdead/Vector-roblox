@@ -1,8 +1,6 @@
 export const runtime = 'nodejs'
 
-import { getSince } from '../../../lib/store/stream'
-
-function sleep(ms: number) { return new Promise((r) => setTimeout(r, ms)) }
+import { getSince, waitForChunks } from '../../../lib/store/stream'
 
 export async function GET(req: Request) {
   const url = new URL(req.url)
@@ -12,12 +10,10 @@ export async function GET(req: Request) {
     return new Response(JSON.stringify({ error: 'Missing workflowId or projectId' }), { status: 400, headers: { 'content-type': 'application/json' } })
   }
 
-  const deadline = Date.now() + 25000
-  let next = getSince(key, cursor)
-  while (next.chunks.length === 0 && Date.now() < deadline) {
-    await sleep(250)
-    next = getSince(key, cursor)
-  }
-  return new Response(JSON.stringify(next), { headers: { 'content-type': 'application/json' } })
+  const timeoutMs = 25000
+  const result = await waitForChunks(key, cursor, timeoutMs)
+  return new Response(
+    JSON.stringify({ cursor: result.cursor, chunks: result.chunks.map((c) => c.text) }),
+    { headers: { 'content-type': 'application/json' } },
+  )
 }
-

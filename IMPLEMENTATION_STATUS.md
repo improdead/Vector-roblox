@@ -1,5 +1,7 @@
 # Vector — Implementation Status
 
+See also: IMPLEMENTATION_PLAN.md for the detailed roadmap, contracts, and acceptance criteria.
+
 This document tracks what’s implemented, partial (placeholder or limited), and not implemented across the Vector codebase, plus decisions/APIs needed from you.
 
 ## Overview
@@ -12,6 +14,38 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 ## Recent Updates
 
+- Checkpoints + conflict loop (July 2026):
+  - Automatic per-user-message checkpoints now run after each applied proposal; manual Snapshot/Restore buttons in the plugin call the API, stream status updates, and refresh TaskState metadata.
+  - Diff3-powered multi-file apply runs on the server, returning structured conflict hunks when merges fail; the plugin renders those hunks inside the diff viewer and blocks auto-apply.
+  - The plugin progress panel consumes TaskState for run badges, checkpoint labels, live progress %, and token telemetry, keeping the UI in sync with streaming events.
+- Model overrides + Gemini support (June 2026):
+  - Plugin exposes a model selector chip (server default vs `gemini-2.5-flash`) and forwards overrides through chat, retry, auto-continue, and workflow follow-up calls.
+  - Backend `POST /api/chat` and orchestrator `runLLM()` accept `modelOverride`, log the active model, and forward it to OpenRouter.
+  - Auto mode now applies `insert_asset` proposals, logging success/error details instead of skipping them.
+- Deterministic linting (June 2026):
+  - Added `.eslintrc.json` in `vector/apps/web`, switched `npm run lint` to `eslint . --ext .ts,.tsx --max-warnings=0`, and wired `prebuild` to lint so builds fail on warnings/errors.
+  - Installed `eslint` and `eslint-config-next` as dev dependencies; `npm run lint` now runs non-interactively.
+- Atomic JSON persistence with journaling (June 2026):
+  - `vector/apps/web/lib/store/persist.ts` writes through `writeJsonAtomic`, appends journal entries before each mutation, and replays unapplied operations on boot.
+  - Proposal/workflow stores automatically recover from mid-write crashes; journal files retain the last 32 entries.
+- TaskState snapshots + tool run tracking (June 2026):
+  - `runLLM()` now records user/assistant/system history, tool runs (queued/running/succeeded/failed), and streaming state in `taskStates.json` via `taskState.ts`.
+  - `/api/chat` responses include the latest `taskState`, enabling UIs to reflect progress without guessing.
+- Context mentions & code discovery (June 2026):
+  - User prompts can reference `@file`, `@folder`, `@url`, and `@problems`; the orchestrator attaches the contents, appends summaries to TaskState, and feeds them to the provider with automatic history compaction. Workspace root resolution now validates `VECTOR_WORKSPACE_ROOT` and logs the resolved root for clarity. File reads use safe limited reads with robust close semantics.
+  - Added read-only tools `list_code_definition_names` and `search_files` so the provider can inspect project structure without mutating anything.
+- Provider retry/backoff & streaming upgrades (June 2026):
+  - `callOpenRouter` now retries failed requests with exponential backoff (`OPENROUTER_MAX_RETRIES`, `OPENROUTER_RETRY_DELAY_MS`, `OPENROUTER_RETRY_MAX_MS`) before surfacing a clear error.
+  - Streaming now uses an event-driven queue for long-poll and exposes `/api/stream/sse` for Server-Sent Events (Cursor-style live updates).
+- Context auto-request fallback (June 2026):
+  - When tools require missing context (e.g., no active script for `apply_edit`), the orchestrator injects a `CONTEXT_REQUEST …` message and retries (up to 3 requests, deduplicated by reason), mirroring Cline/Cursor’s auto-ask behaviour. Progress is streamed via `context.request <reason>` lines.
+- Implementation plan refresh (June 2026):
+  - Replaced previous phased roadmap with a Today → Next → This Week checklist covering linting, atomic persistence, TaskState snapshots, auto-approval, checkpoints, diff upgrades, streaming, context, resilience, plugin UX, and read-only code tools.
+- Composer UI refresh (June 2026):
+  - Rebuilt composer to match the provided mockup: attachment chips row, “Write, @ for context, / for commands” placeholder, combined ∞/Agent pill with inline auto toggle, model dropdown chip, and a quick menu (Retry/Next) behind the image button.
+  - Progress label hides until non-zero progress, quick menu closes automatically on send or when the viewport shrinks, and the send button keeps its styling during retries.
+- Backend build verification (June 2026):
+  - `npm install && npm run build` succeeds in `vector/apps/web`, confirming the new schema changes compile.
 - Code quality fixes (September 2025):
   - `vector/plugin/src/main.server.lua` declares `CURRENT_MODE` at file scope and avoids duplicate local state.
   - `vector/plugin/src/main.server.lua` reads the `vector_backend_base_url` plugin setting before falling back to localhost.
@@ -30,7 +64,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 - Orchestrator selection defaults: when exactly one instance is selected, infer missing `path`/`parentPath` for common tools (`set_properties`, `rename_instance`, `delete_instance`, `create_instance`, `insert_asset`).
 - Edit constraints enforced server‑side: sort + non‑overlap check, with caps (≤20 edits, ≤2000 inserted characters). Invalid edits trigger validation feedback.
 - Delete guard: refusing `delete_instance` at `game`/service roots to prevent destructive mistakes.
-- Added Auto mode in the Studio plugin (toggle chip). When enabled, Vector auto‑applies proposals and continues the loop with bounded steps, logging each action in the status panel. UI design unchanged (reuses chip styling) and step logs appear right after user input.
+- Added Auto mode in the Studio plugin. When enabled, Vector auto‑applies proposals (including asset inserts) and continues the loop with bounded steps, logging each action in the status panel and updating the progress badge.
 - Input UX: Added Enter-to-Send in the plugin composer. Press Enter to send; Shift+Enter inserts a newline.
 - Backend `/api/assets/generate3d` now proxies to Meshy; configurable via env.
 - Plugin Settings panel removed. Provider configuration is sourced from backend `.env` instead of Studio settings.
@@ -43,7 +77,9 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - Orchestrator core
   - `runLLM()` maps tool-calls to proposals; adds fallback behaviors.
+    - Returns `{ proposals, taskState }` (history + tool runs + streaming metadata).
     - `vector/apps/web/lib/orchestrator/index.ts:1`
+    - Supports mention attachments (`@file`, `@folder`, `@url`) with automatic TaskState compaction and provider-visible context blocks.
   - Deterministic templates for milestone verification
     - Recognizes “grid 3x3” and “farming” and returns sequential object-op proposals without provider.
     - Edit proposals include `safety.beforeHash` for conflict detection.
@@ -55,14 +91,16 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - Validation retries and diagnostics
     - On zod validation failure, reflect the error back to the model and retry up to 2 times, then error out.
     - Unknown tool names are echoed back once as a validation error to allow self-correction.
-    - Emits structured status/error chunks via in-memory stream store.
+  - Emits structured status/error chunks via in-memory stream store. The stream store now cleans idle workflows periodically to prevent memory leaks.
     - Env: `VECTOR_DISABLE_FALLBACKS=1` to disable server-side fallbacks (errors surface to client).
     - `vector/apps/web/lib/orchestrator/index.ts:1`
   - Tool schemas (Zod): strict validation for all advertised tools.
     - `vector/apps/web/lib/tools/schemas.ts:1`
+    - Includes read-only `list_code_definition_names` and `search_files` definitions.
+    - Includes read-only code intelligence tools `list_code_definition_names` and `search_files`.
   - Provider adapter (OpenRouter-compatible, OpenAI Chat Completions).
     - `vector/apps/web/lib/orchestrator/providers/openrouter.ts:1`
-    - Adds request timeout with abort (env `OPENROUTER_TIMEOUT_MS`, default 30000ms).
+  - Adds request timeout with abort (env `OPENROUTER_TIMEOUT_MS`, default 30000ms). Clear error when `OPENROUTER_API_KEY` is missing with guidance.
   - Range edits + unified diff utilities.
     - `vector/apps/web/lib/diff/rangeEdits.ts:1`
   - In-memory sessions (last tool result), file-backed proposals store.
@@ -72,8 +110,8 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - API routes (Next.js)
   - `POST /api/chat`: validates input, calls orchestrator, persists proposals.
-    - Accepts optional `workflowId`, `approvedStepId`. Creates a workflow if missing and returns `{ workflowId, proposals, isComplete:false }`.
-    - Also accepts `mode` ('ask' | 'agent'), `maxTurns` (int), and `enableFallbacks` (bool) to control per‑request orchestration.
+    - Accepts optional `workflowId`, `approvedStepId`, and `autoApply` (mirrors Auto toggle). Creates a workflow if missing and returns `{ workflowId, proposals, taskState, isComplete:false }`.
+    - Supports per-request `mode` ('ask' | 'agent'), `maxTurns` (int), `enableFallbacks` (bool), and `modelOverride` (string).
     - `vector/apps/web/app/api/chat/route.ts:1`
   - `GET /api/proposals`: lists persisted proposals; `POST /api/proposals/:id/apply`: marks applied.
     - `vector/apps/web/app/api/proposals/route.ts:1`
@@ -81,6 +119,9 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - Apply route updates corresponding workflow step to `completed` when present.
   - `GET /api/stream`: long-poll status chunks for a `workflowId` or `projectId`.
     - `vector/apps/web/app/api/stream/route.ts:1`
+    - Event-driven wait using the shared stream bus (no tight polling loop).
+  - `GET /api/stream/sse`: Server-Sent Events endpoint for the same stream (dashboards/CLI).
+    - `vector/apps/web/app/api/stream/sse/route.ts:1`
   - `GET /api/assets/search`: calls catalog provider with stub fallback if `CATALOG_API_URL` unset.
     - `vector/apps/web/app/api/assets/search/route.ts:1`
     - `vector/apps/web/lib/catalog/search.ts:1`
@@ -105,10 +146,11 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - Streaming: single long-poll `/api/stream` poller per workflow showing progress lines in the UI.
     - Dispatcher: object ops executed via tool modules; each mutation wrapped in ChangeHistory for an undo step.
     - Edit safety: validates `safety.beforeHash` (sha1) before applying edits; blocks on mismatch with a re-preview hint.
+    - Auto mode only auto-applies proposals tagged `meta.autoApproved === true`; others remain for manual approval, preventing risky unattended actions.
   - Network helpers (GET/POST JSON).
     - `vector/plugin/src/net/http.lua:1`
-  - Tool modules (Luau)
-    - Context: `get_active_script`, `list_selection` (implemented), `list_open_documents` (placeholder)
+-- Tool modules (Luau)
+    - Context: `get_active_script`, `list_selection` (implemented), `list_open_documents` (best‑effort; falls back to ActiveScript on legacy)
       - `vector/plugin/src/tools/get_active_script.lua:1`
       - `vector/plugin/src/tools/list_selection.lua:1`
       - `vector/plugin/src/tools/list_open_documents.lua:1`
@@ -129,13 +171,8 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 ## Partially Implemented (placeholders or limited)
 
 - list_open_documents (plugin)
-  - Placeholder returns only ActiveScript; Roblox APIs don’t expose full tab enumeration in a simple way.
+  - Event-driven tracking via ScriptEditorService when available; still falls back to ActiveScript-only on legacy Studio builds.
   - `vector/plugin/src/tools/list_open_documents.lua:1`
-
-- apply_edit (plugin tool)
-  - Minimal handler expects server to pre-merge text edits (`edits.__finalText`) rather than performing range application client-side.
-  - Production path should merge edits into final source before `UpdateSourceAsync` or port the server’s range edit logic.
-  - `vector/plugin/src/tools/apply_edit.lua:1`
 
 - generate_asset_3d (backend + plugin)
   - Backend route enqueues a placeholder job and returns `jobId`. No GPU, no Open Cloud upload, no assetId return.
@@ -162,15 +199,11 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 ## Not Implemented
 
-- UI Retry/Ask shortcuts
-  - Resume via `workflowId` is possible; explicit Retry/Ask buttons in the plugin UI are not added yet.
+- Advanced chat shortcuts
+  - Quick menu covers Retry/Next, but there are still no dedicated buttons for one-click “Ask” prompts, context presets, or slash-command menus.
 
-- Advanced diff merging on server
-  - Server merges range edits only for previews; no generalized multi-edit conflict resolution beyond simple application.
-
-- Full provider-driven, multi-turn tool loop
-  - Core loop implemented with context tools and validation retries; still missing backoff, summarization, and advanced guardrails.
-  - `vector/apps/web/lib/orchestrator/context.ts` has placeholder token accounting.
+- Conversation summarization & guardrails
+  - Context auto-request and history trimming are in place, but full summarization, guardrail prompts, and cross-run memory limits remain TODO.
 
 - Analysis/CI tools (backend jobs)
   - `analyze_luau`, `run_tests`, `snapshot_project` not implemented.
@@ -183,7 +216,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - No frontend UI to browse proposals/history beyond simple API JSON.
 
 - Thumbnails proxying/caching for assets
-  - Backend doesn’t proxy or cache images; plugin list view shows names only.
+  - Backend doesn’t proxy or cache images; plugin list view shows names only. (Unchanged)
 
 ## Needs From You
 
@@ -207,7 +240,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - Target output format (mesh type, poly limits, thumbnail handling).
 
 - Streaming vs polling
-  - Choose transport for Studio (recommend long-polling `/api/stream`). If approved, I’ll implement backend route + plugin polling loop.
+  - Studio uses long-polling `/api/stream`; an SSE route (`/api/stream/sse`) exists for dashboards.
 
 - Persistence strategy
   - Confirm if we should move from JSON file to SQLite/Prisma, and any hosting constraints (e.g., Vercel Postgres).

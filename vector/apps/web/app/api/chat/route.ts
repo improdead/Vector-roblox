@@ -21,6 +21,8 @@ const ChatSchema = z.object({
     openDocs: z.array(z.object({ path: z.string() })).optional(),
   }),
   provider: ProviderSchema,
+  modelOverride: z.string().min(1).optional(),
+  autoApply: z.boolean().optional(),
   workflowId: z.string().optional(),
   approvedStepId: z.number().optional(),
   mode: z.enum(['ask', 'agent']).optional(),
@@ -32,7 +34,7 @@ export async function POST(req: Request) {
   try {
     const input = ChatSchema.parse(await req.json())
     const providerName = input.provider?.name || 'none'
-    const model = input.provider?.model || 'default'
+    const model = input.modelOverride || input.provider?.model || 'default'
     const useProvider = !!input.provider?.apiKey
     console.log(
       `[chat] project=${input.projectId} mode=${input.mode || 'agent'} provider=${providerName} model=${model} useProvider=${useProvider} msgLen=${input.message.length}`,
@@ -48,8 +50,9 @@ export async function POST(req: Request) {
       pushChunk(workflowId, 'planning: started')
     }
 
-    const proposals = await runLLM(input as any)
+    const { proposals, taskState } = await runLLM(input as any)
     console.log(`[chat] proposals.count=${proposals.length}`)
+    const isComplete = proposals.some((p: any) => p && p.type === 'completion')
 
     // Persist proposals for auditing and later apply acknowledgement
     try {
@@ -63,7 +66,7 @@ export async function POST(req: Request) {
       console.warn('[chat] persist.warn non-fatal', e)
     }
 
-    return Response.json({ workflowId, proposals, isComplete: false })
+    return Response.json({ workflowId, proposals, taskState, isComplete })
   } catch (err: any) {
     const msg = err?.message || 'Unknown error'
     const status = /invalid/i.test(msg) ? 400 : 500

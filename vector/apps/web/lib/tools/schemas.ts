@@ -23,7 +23,7 @@ const ParentEither = z
 export const Tools = {
   get_active_script: z.object({}),
   list_selection: z.object({}),
-  list_open_documents: z.object({}),
+  list_open_documents: z.object({ maxCount: z.number().min(1).max(100).optional() }),
   show_diff: z.object({ path: z.string(), edits: z.array(Edit) }),
   apply_edit: z.object({ path: z.string(), edits: z.array(Edit) }),
   create_instance: z
@@ -39,5 +39,28 @@ export const Tools = {
   search_assets: z.object({ query: z.string(), tags: z.array(z.string()).optional(), limit: z.number().min(1).max(50).optional() }),
   insert_asset: z.object({ assetId: z.number(), parentPath: z.string().optional() }),
   generate_asset_3d: z.object({ prompt: z.string(), tags: z.array(z.string()).optional(), style: z.string().optional(), budget: z.number().optional() }),
+  list_code_definition_names: z.object({
+    root: z.string().optional(),
+    limit: z.number().min(1).max(500).optional(),
+    exts: z.array(z.string()).optional(),
+  }),
+  search_files: z.object({
+    query: z.string().min(1),
+    root: z.string().optional(),
+    limit: z.number().min(1).max(100).optional(),
+    exts: z.array(z.string()).optional(),
+    caseSensitive: z.boolean().optional(),
+  }),
+  // Explicit completion tools (Cline-style)
+  // Preferred
+  complete: z.object({
+    summary: z.string().min(1),
+    confidence: z.number().min(0).max(1).optional(),
+  }),
+  // Alias for compatibility with Cline terminology
+  attempt_completion: z.object({
+    result: z.string().min(1),
+    confidence: z.number().min(0).max(1).optional(),
+  }),
 }
 export type ToolsShape = typeof Tools
