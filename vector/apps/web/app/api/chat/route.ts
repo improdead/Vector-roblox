@@ -5,7 +5,7 @@ import { runLLM } from '../../../lib/orchestrator'
 import { saveProposals } from '../../../lib/store/proposals'
 
 const ProviderSchema = z.object({
-  name: z.literal('openrouter'),
+  name: z.enum(['openrouter', 'gemini']),
   apiKey: z.string().min(1),
   baseUrl: z.string().url().optional(),
   model: z.string().optional(),
