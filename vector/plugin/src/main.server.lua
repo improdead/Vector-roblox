@@ -1262,6 +1262,7 @@ local function buildUI(gui)
             hideConnection = nil
         end
     end
+    end)
     
     autoToggleBtn.MouseEnter:Connect(function()
         -- Set initial transparent state for animation
@@ -1511,7 +1512,7 @@ local function buildUI(gui)
     return ui
 end
 
-local function renderAssetResults(container, p, results)
+local function renderAssetResults(container, p, results) 
 	container:ClearAllChildren()
 	local layout = Instance.new("UIListLayout")
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
