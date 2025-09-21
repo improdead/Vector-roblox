@@ -106,6 +106,71 @@ import { extractMentions } from '../context/mentions'
 import { listCodeDefinitionNames, searchFiles } from '../tools/codeIntel'
 import { annotateAutoApproval } from './autoApprove'
 
+type ProviderMode = 'openrouter' | 'gemini'
+
+type ProviderSelection = {
+  mode: ProviderMode
+  apiKey: string
+  model?: string
+  baseUrl?: string
+}
+
+function normalizeString(value?: string | null): string | undefined {
+  const trimmed = typeof value === 'string' ? value.trim() : undefined
+  return trimmed ? trimmed : undefined
+}
+
+function determineProvider(opts: { input: ChatInput; modelOverride?: string | null }): ProviderSelection | null {
+  const { input, modelOverride } = opts
+  const overrideRaw = normalizeString(modelOverride)
+  const overrideIsGemini = !!overrideRaw && overrideRaw.toLowerCase().startsWith('gemini')
+  const defaultProviderEnv = normalizeString(process.env.VECTOR_DEFAULT_PROVIDER)?.toLowerCase()
+  const forceOpenRouter = (process.env.VECTOR_USE_OPENROUTER || '0') === '1'
+
+  const preference: ProviderMode[] = []
+  if (overrideRaw) preference.push(overrideIsGemini ? 'gemini' : 'openrouter')
+  if (input.provider?.name === 'gemini') preference.push('gemini')
+  if (input.provider?.name === 'openrouter') preference.push('openrouter')
+  if (defaultProviderEnv === 'gemini') preference.push('gemini')
+  if (defaultProviderEnv === 'openrouter') preference.push('openrouter')
+  if (forceOpenRouter) preference.push('openrouter')
+  // Ensure we eventually try both providers as fallbacks in a deterministic order
+  preference.push('gemini', 'openrouter')
+
+  const ordered: ProviderMode[] = []
+  for (const mode of preference) {
+    if (!ordered.includes(mode)) ordered.push(mode)
+  }
+
+  for (const mode of ordered) {
+    if (mode === 'openrouter') {
+      const providerInput = input.provider?.name === 'openrouter' ? input.provider : undefined
+      const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.OPENROUTER_API_KEY)
+      if (!apiKey) continue
+      const model =
+        normalizeString(providerInput?.model) ||
+        (overrideRaw && !overrideIsGemini ? overrideRaw : undefined) ||
+        normalizeString(process.env.OPENROUTER_MODEL)
+      const baseUrl = normalizeString(providerInput?.baseUrl)
+      return { mode, apiKey, model, baseUrl }
+    }
+
+    if (mode === 'gemini') {
+      const providerInput = input.provider?.name === 'gemini' ? input.provider : undefined
+      const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.GEMINI_API_KEY)
+      if (!apiKey) continue
+      const model =
+        normalizeString(providerInput?.model) ||
+        (overrideIsGemini ? overrideRaw : undefined) ||
+        normalizeString(process.env.GEMINI_MODEL)
+      const baseUrl = normalizeString(providerInput?.baseUrl) || normalizeString(process.env.GEMINI_API_BASE_URL)
+      return { mode, apiKey, model, baseUrl }
+    }
+  }
+
+  return null
+}
+
 const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
 
 Core rules
@@ -164,10 +229,11 @@ Modes
 - Auto: assume approved small steps; avoid destructive ops; skip actions that require human choice.
 
 Assets & 3D
-- search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
-- insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
-- generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
-- When search_assets returns no results, metadata reports a stub/fallback, or fallback.asset search fires, stop retrying catalog lookups. Switch to manual creation: use create_instance for simple primitives or author Luau via show_diff/apply_edit to build the requested content so the scene still progresses.
+ - search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
+ - insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
+ - generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
+ - If search_assets returns no results or metadata reports a stub/fallback, stop retrying catalog lookups.
+ - Switch to manual creation: use create_instance for simple primitives or author Luau via show_diff/apply_edit so the scene still progresses.
 
 Validation & recovery
 - On VALIDATION_ERROR, resubmit the SAME tool once with corrected args; no commentary and no tool switching.
@@ -517,39 +583,12 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
   // Provider gating
   const providerRequestedName = input.provider?.name
-  const providerRequested = !!input.provider?.apiKey
-  const openrouterAvailable = !!(
-    (providerRequested && providerRequestedName === 'openrouter' && input.provider?.apiKey) ||
-    (!providerRequested && process.env.OPENROUTER_API_KEY)
-  )
-  const geminiAvailable = !!(
-    (providerRequested && providerRequestedName === 'gemini' && input.provider?.apiKey) ||
-    (!providerRequested && process.env.GEMINI_API_KEY)
-  )
-
-  const defaultProviderEnv = (process.env.VECTOR_DEFAULT_PROVIDER || '').trim().toLowerCase()
-  const overrideLower = modelOverride?.trim().toLowerCase()
-
-  let providerMode: 'openrouter' | 'gemini' | null = null
-  if (overrideLower?.startsWith('gemini')) providerMode = 'gemini'
-  else if (overrideLower) providerMode = 'openrouter'
-  else if (providerRequestedName === 'gemini') providerMode = 'gemini'
-  else if (providerRequestedName === 'openrouter') providerMode = 'openrouter'
-  else if (defaultProviderEnv === 'gemini') providerMode = 'gemini'
-  else if (defaultProviderEnv === 'openrouter') providerMode = 'openrouter'
-  else if (process.env.VECTOR_USE_OPENROUTER === '1') providerMode = 'openrouter'
-
-  if (providerMode === 'gemini' && !geminiAvailable) providerMode = null
-  if (providerMode === 'openrouter' && !openrouterAvailable) providerMode = null
-
-  if (!providerMode) {
-    if (geminiAvailable) providerMode = 'gemini'
-    else if (openrouterAvailable) providerMode = 'openrouter'
-  }
-
-  const useProvider = providerMode !== null
+  const providerRequested = !!normalizeString(input.provider?.apiKey)
+  const providerSelection = determineProvider({ input, modelOverride })
+  const activeProvider = providerSelection?.mode
+  const useProvider = !!providerSelection
   const streamKey = (input as any).workflowId || input.projectId
-  const startLog = `provider=${useProvider ? providerMode : 'fallback'} mode=${input.mode || 'agent'} model=${modelOverride || input.provider?.model || (providerMode === 'gemini' ? process.env.GEMINI_MODEL || 'gemini-2.5-flash' : 'default')}`
+  const startLog = `provider=${useProvider ? activeProvider : 'fallback'} mode=${input.mode || 'agent'} model=${providerSelection?.model || 'default'}`
   pushChunk(streamKey, `orchestrator.start ${startLog}`)
   console.log(`[orch] start ${startLog} msgLen=${msg.length}`)
 
@@ -629,8 +668,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     return parts.join('\n')
   }
 
-  if (useProvider) {
-    const activeProvider = providerMode as 'openrouter' | 'gemini'
+  if (useProvider && providerSelection && activeProvider) {
     const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
     const maxTurns = Number(
       typeof input.maxTurns === 'number'
@@ -662,7 +700,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       const startedAt = Date.now()
       updateState((state) => {
         state.streaming.isStreaming = true
-        state.runs.push({ id: runId, tool: 'provider.call', input: { model: input.provider?.model || modelOverride }, status: 'running', startedAt })
+        state.runs.push({ id: runId, tool: 'provider.call', input: { model: providerSelection?.model }, status: 'running', startedAt })
       })
 
       let content = ''
@@ -676,17 +714,17 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           ? await callGemini({
               systemPrompt: SYSTEM_PROMPT,
               messages: messages as any,
-              model: input.provider?.name === 'gemini' ? (input.provider?.model || modelOverride) : modelOverride,
-              apiKey: input.provider?.name === 'gemini' ? input.provider?.apiKey : undefined,
-              baseUrl: input.provider?.name === 'gemini' ? input.provider?.baseUrl : undefined,
+              model: providerSelection.model,
+              apiKey: providerSelection.apiKey,
+              baseUrl: providerSelection.baseUrl,
               timeoutMs,
             })
           : await callOpenRouter({
               systemPrompt: SYSTEM_PROMPT,
               messages: messages as any,
-              model: input.provider?.model || modelOverride,
-              apiKey: input.provider?.name === 'openrouter' ? input.provider?.apiKey : undefined,
-              baseUrl: input.provider?.name === 'openrouter' ? input.provider?.baseUrl : undefined,
+              model: providerSelection.model,
+              apiKey: providerSelection.apiKey,
+              baseUrl: providerSelection.baseUrl,
               timeoutMs,
             })
         content = resp.content || ''
