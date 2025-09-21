@@ -16,6 +16,7 @@ local ChangeHistoryService = game:GetService("ChangeHistoryService")
 local InsertService = game:GetService("InsertService")
 local UserInputService = game:GetService("UserInputService")
 local ServerStorage = game:GetService("ServerStorage")
+local TweenService = game:GetService("TweenService")
 local ToolCreate = require(script.Parent.tools.create_instance)
 local ToolSetProps = require(script.Parent.tools.set_properties)
 local ToolRename = require(script.Parent.tools.rename_instance)
@@ -1057,6 +1058,36 @@ local function buildUI(gui)
     autoToggleBtn.TextColor3 = Color3.fromRGB(150, 150, 150)
     autoToggleBtn.Parent = modeChip
 
+    -- Tooltip label
+    local autoToggleBtnTooltip = Instance.new("TextLabel")
+    autoToggleBtnTooltip.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+    autoToggleBtnTooltip.TextColor3 = Color3.fromRGB(255, 255, 255)
+    autoToggleBtnTooltip.Text = "Auto Toggle"
+    autoToggleBtnTooltip.Font = Enum.Font.Gotham
+    autoToggleBtnTooltip.TextSize = 12
+    autoToggleBtnTooltip.BackgroundTransparency = 0.1
+    autoToggleBtnTooltip.Visible = false
+    autoToggleBtnTooltip.ZIndex = 100
+    autoToggleBtnTooltip.Size = UDim2.new(0, 80, 0, 24)
+    autoToggleBtnTooltip.TextXAlignment = Enum.TextXAlignment.Center
+    autoToggleBtnTooltip.TextYAlignment = Enum.TextYAlignment.Center
+    
+    -- Add padding and corner radius to tooltip
+    local tooltipPadding = Instance.new("UIPadding")
+    tooltipPadding.PaddingLeft = UDim.new(0, 8)
+    tooltipPadding.PaddingRight = UDim.new(0, 8)
+    tooltipPadding.PaddingTop = UDim.new(0, 4)
+    tooltipPadding.PaddingBottom = UDim.new(0, 4)
+    tooltipPadding.Parent = autoToggleBtnTooltip
+    
+    local tooltipCorner = Instance.new("UICorner")
+    tooltipCorner.CornerRadius = UDim.new(0, 4)
+    tooltipCorner.Parent = autoToggleBtnTooltip
+    
+    -- Position tooltip relative to the root frame
+    autoToggleBtnTooltip.Parent = root
+
+
     local modeBtn = Instance.new("TextButton")
     modeBtn.BackgroundTransparency = 1
     modeBtn.AutoButtonColor = false
@@ -1171,9 +1202,112 @@ local function buildUI(gui)
         autoToggleBtn.TextColor3 = _G.__VECTOR_AUTO and Color3.fromRGB(120, 210, 160) or Color3.fromRGB(150, 150, 150)
         autoToggleBtn.Text = _G.__VECTOR_AUTO and "∞✓" or "∞"
     end
+
     setAuto(_G.__VECTOR_AUTO)
     autoToggleBtn.MouseButton1Click:Connect(function()
         setAuto(not _G.__VECTOR_AUTO)
+    end)
+
+    -- Show/hide on hover with animation
+    local tooltipTweenInfo = TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+    local showTween, hideTween
+    local isTooltipVisible = false
+    local hideConnection = nil
+    autoToggleBtn.MouseEnter:Connect(function()
+        -- Cancel any ongoing hide animation
+        if hideTween then hideTween:Cancel() end
+
+        -- Set initial transparent state for animation
+    local function positionTooltipWithinViewport()
+        local buttonPos = autoToggleBtn.AbsolutePosition
+        local buttonSize = autoToggleBtn.AbsoluteSize
+        
+        -- Get viewport size (accounting for DPI scaling)
+        local viewportSize = workspace.CurrentCamera.ViewportSize
+        local uiScale = game:GetService("GuiService"):GetGuiInset()
+        
+        -- Tooltip dimensions
+        local tooltipWidth = 80
+        local tooltipHeight = 24
+        local spacing = 8
+        
+        -- Calculate desired position (above button, centered)
+        local desiredX = buttonPos.X + (buttonSize.X / 2) - (tooltipWidth / 2)
+        local desiredY = buttonPos.Y - tooltipHeight - spacing
+        
+        -- Clamp X position within viewport bounds
+        local clampedX = math.max(uiScale.X, math.min(desiredX, viewportSize.X - tooltipWidth - uiScale.X))
+        
+        -- If tooltip would go above viewport, position below button instead
+        local clampedY = desiredY
+        if clampedY < uiScale.Y then
+            clampedY = buttonPos.Y + buttonSize.Y + spacing
+        end
+        
+        return UDim2.new(0, clampedX, 0, clampedY)
+    end
+    
+    -- Clean up tween connections
+    local function cleanupTweens()
+        if showTween then 
+            showTween:Cancel()
+            showTween = nil
+        end
+        if hideTween then 
+            hideTween:Cancel()
+            hideTween = nil
+        end
+        if hideConnection then
+            hideConnection:Disconnect()
+            hideConnection = nil
+        end
+    end
+    
+    autoToggleBtn.MouseEnter:Connect(function()
+        -- Set initial transparent state for animation
+        autoToggleBtnTooltip.BackgroundTransparency = 1
+        autoToggleBtnTooltip.TextTransparency = 1
+        
+        --cleanupTweens()
+        
+        -- Position tooltip within viewport bounds
+        autoToggleBtnTooltip.Position = positionTooltipWithinViewport()
+        autoToggleBtnTooltip.Visible = true
+        isTooltipVisible = true
+        
+        -- Animate in
+        showTween = TweenService:Create(autoToggleBtnTooltip, tooltipTweenInfo, {
+            BackgroundTransparency = 0.1,
+            TextTransparency = 0
+        })
+        showTween:Play()
+    end)
+
+    autoToggleBtn.MouseLeave:Connect(function()
+        -- Only hide if currently visible
+        if not isTooltipVisible then return end
+        
+        -- Clean up any existing tweens
+        --cleanupTweens()
+        
+        -- Animate out
+        hideTween = TweenService:Create(autoToggleBtnTooltip, tooltipTweenInfo, {
+            BackgroundTransparency = 1,
+            TextTransparency = 1
+        })
+
+        hideTween:Play()
+        
+        -- Store connection for cleanup
+        hideConnection = hideTween.Completed:Connect(function()
+            autoToggleBtnTooltip.Visible = false
+            isTooltipVisible = false
+            -- Reset transparency values for next show
+            autoToggleBtnTooltip.BackgroundTransparency = 1
+            autoToggleBtnTooltip.TextTransparency = 1
+            -- Clean up connection
+            hideConnection = nil
+        end)
     end)
 
     -- Initialize model label + toggle handler
