@@ -1213,8 +1213,11 @@ local function buildUI(gui)
     local showTween, hideTween
     local isTooltipVisible = false
     local hideConnection = nil
-    
-    -- Helper function to position tooltip within viewport
+    autoToggleBtn.MouseEnter:Connect(function()
+        -- Cancel any ongoing hide animation
+        if hideTween then hideTween:Cancel() end
+
+        -- Set initial transparent state for animation
     local function positionTooltipWithinViewport()
         local buttonPos = autoToggleBtn.AbsolutePosition
         local buttonSize = autoToggleBtn.AbsoluteSize
