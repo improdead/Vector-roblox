@@ -9,9 +9,17 @@ export async function GET(req: Request) {
   const t0 = Date.now()
   try {
     const results = await searchRobloxCatalog(query, limit)
+    const isStubProvider = !process.env.CATALOG_API_URL
+    const hasResults = results.length > 0
+    const metadata: Record<string, any> = { isStub: isStubProvider, hasResults }
+    if (isStubProvider) {
+      metadata.fallbackReason = 'catalog_not_configured'
+    } else if (!hasResults) {
+      metadata.fallbackReason = 'no_results'
+    }
     const dt = Date.now() - t0
     console.log(`[assets.search] q="${query}" limit=${limit} results=${results.length} dtMs=${dt}`)
-    return Response.json({ results, query, limit })
+    return Response.json({ results, query, limit, metadata })
   } catch (err: any) {
     const dt = Date.now() - t0
     console.error(`[assets.search] error q="${query}" limit=${limit} dtMs=${dt} msg=${err?.message || 'unknown'}`)

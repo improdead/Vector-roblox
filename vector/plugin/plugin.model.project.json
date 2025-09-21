@@ -1,22 +1,17 @@
 {
   "$schema": "https://raw.githubusercontent.com/rojo-rbx/rojo/master/schema.json",
-  "name": "VectorPlugin",
+  "name": "Vector",
   "tree": {
     "$className": "Folder",
     "Main": {
       "$path": "src/main.server.lua",
       "$properties": {
         "RunContext": "Plugin",
-        "Disabled": false
+        "Disabled": false,
+        "Name": "Main"
       }
     },
-    "tools": {
-      "$className": "Folder",
-      "$path": "src/tools"
-    },
-    "net": {
-      "$className": "Folder",
-      "$path": "src/net"
-    }
+    "tools": { "$className": "Folder", "$path": "src/tools" },
+    "net":   { "$className": "Folder", "$path": "src/net" }
   }
 }

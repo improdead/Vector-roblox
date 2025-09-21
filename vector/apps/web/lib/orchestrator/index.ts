@@ -58,7 +58,7 @@ export type ChatInput = {
     selection?: { className: string; path: string }[]
     openDocs?: { path: string }[]
   }
-  provider?: { name: 'openrouter'; apiKey: string; model?: string; baseUrl?: string }
+  provider?: { name: 'openrouter' | 'gemini'; apiKey: string; model?: string; baseUrl?: string }
   modelOverride?: string | null
   autoApply?: boolean
   mode?: 'ask' | 'agent'
@@ -94,6 +94,7 @@ function computeAnchors(baseText: string, edits: Edit[]): EditAnchors {
 
 // Provider call
 import { callOpenRouter } from './providers/openrouter'
+import { callGemini } from './providers/gemini'
 import { z } from 'zod'
 import { Tools } from '../tools/schemas'
 import { getSession, setLastTool } from '../store/sessions'
@@ -166,6 +167,7 @@ Assets & 3D
 - search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
 - insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
 - generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
+- When search_assets returns no results, metadata reports a stub/fallback, or fallback.asset search fires, stop retrying catalog lookups. Switch to manual creation: use create_instance for simple primitives or author Luau via show_diff/apply_edit to build the requested content so the scene still progresses.
 
 Validation & recovery
 - On VALIDATION_ERROR, resubmit the SAME tool once with corrected args; no commentary and no tool switching.
@@ -514,10 +516,40 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   const selIsContainer = !!selPath && /^(?:game\.(?:Workspace|ReplicatedStorage|ServerStorage|StarterGui|StarterPack|StarterPlayer|Lighting|Teams|SoundService|TextService|CollectionService)|game\.[A-Za-z]+\.[\s\S]+)/.test(selPath)
 
   // Provider gating
-  const providerRequested = !!(input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey)
-  const useProvider = providerRequested || process.env.VECTOR_USE_OPENROUTER === '1'
+  const providerRequestedName = input.provider?.name
+  const providerRequested = !!input.provider?.apiKey
+  const openrouterAvailable = !!(
+    (providerRequested && providerRequestedName === 'openrouter' && input.provider?.apiKey) ||
+    (!providerRequested && process.env.OPENROUTER_API_KEY)
+  )
+  const geminiAvailable = !!(
+    (providerRequested && providerRequestedName === 'gemini' && input.provider?.apiKey) ||
+    (!providerRequested && process.env.GEMINI_API_KEY)
+  )
+
+  const defaultProviderEnv = (process.env.VECTOR_DEFAULT_PROVIDER || '').trim().toLowerCase()
+  const overrideLower = modelOverride?.trim().toLowerCase()
+
+  let providerMode: 'openrouter' | 'gemini' | null = null
+  if (overrideLower?.startsWith('gemini')) providerMode = 'gemini'
+  else if (overrideLower) providerMode = 'openrouter'
+  else if (providerRequestedName === 'gemini') providerMode = 'gemini'
+  else if (providerRequestedName === 'openrouter') providerMode = 'openrouter'
+  else if (defaultProviderEnv === 'gemini') providerMode = 'gemini'
+  else if (defaultProviderEnv === 'openrouter') providerMode = 'openrouter'
+  else if (process.env.VECTOR_USE_OPENROUTER === '1') providerMode = 'openrouter'
+
+  if (providerMode === 'gemini' && !geminiAvailable) providerMode = null
+  if (providerMode === 'openrouter' && !openrouterAvailable) providerMode = null
+
+  if (!providerMode) {
+    if (geminiAvailable) providerMode = 'gemini'
+    else if (openrouterAvailable) providerMode = 'openrouter'
+  }
+
+  const useProvider = providerMode !== null
   const streamKey = (input as any).workflowId || input.projectId
-  const startLog = `provider=${useProvider ? 'openrouter' : 'fallback'} mode=${input.mode || 'agent'} model=${modelOverride || input.provider?.model || 'default'}`
+  const startLog = `provider=${useProvider ? providerMode : 'fallback'} mode=${input.mode || 'agent'} model=${modelOverride || input.provider?.model || (providerMode === 'gemini' ? process.env.GEMINI_MODEL || 'gemini-2.5-flash' : 'default')}`
   pushChunk(streamKey, `orchestrator.start ${startLog}`)
   console.log(`[orch] start ${startLog} msgLen=${msg.length}`)
 
@@ -598,6 +630,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   if (useProvider) {
+    const activeProvider = providerMode as 'openrouter' | 'gemini'
     const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
     const maxTurns = Number(
       typeof input.maxTurns === 'number'
@@ -634,16 +667,31 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
       let content = ''
       try {
-        const resp = await callOpenRouter({
-          systemPrompt: SYSTEM_PROMPT,
-          messages: messages as any,
-          model: input.provider?.model || modelOverride,
-          apiKey: input.provider?.apiKey,
-          baseUrl: input.provider?.baseUrl,
-        })
+        const timeoutMs = Number(
+          activeProvider === 'gemini'
+            ? process.env.GEMINI_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
+            : process.env.OPENROUTER_TIMEOUT_MS || 30000,
+        )
+        const resp = activeProvider === 'gemini'
+          ? await callGemini({
+              systemPrompt: SYSTEM_PROMPT,
+              messages: messages as any,
+              model: input.provider?.name === 'gemini' ? (input.provider?.model || modelOverride) : modelOverride,
+              apiKey: input.provider?.name === 'gemini' ? input.provider?.apiKey : undefined,
+              baseUrl: input.provider?.name === 'gemini' ? input.provider?.baseUrl : undefined,
+              timeoutMs,
+            })
+          : await callOpenRouter({
+              systemPrompt: SYSTEM_PROMPT,
+              messages: messages as any,
+              model: input.provider?.model || modelOverride,
+              apiKey: input.provider?.name === 'openrouter' ? input.provider?.apiKey : undefined,
+              baseUrl: input.provider?.name === 'openrouter' ? input.provider?.baseUrl : undefined,
+              timeoutMs,
+            })
         content = resp.content || ''
-        pushChunk(streamKey, `provider.response turn=${turn} chars=${content.length}`)
-        console.log(`[orch] provider.ok turn=${turn} contentLen=${content.length}`)
+        pushChunk(streamKey, `provider.response provider=${activeProvider} turn=${turn} chars=${content.length}`)
+        console.log(`[orch] provider.ok provider=${activeProvider} turn=${turn} contentLen=${content.length}`)
         updateState((state) => {
           const run = state.runs.find((r) => r.id === runId)
           if (run) {
@@ -654,8 +702,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         })
         appendHistory('assistant', content)
       } catch (e: any) {
-        pushChunk(streamKey, `error.provider ${e?.message || 'unknown'}`)
-        console.error(`[orch] provider.error ${e?.message || 'unknown'}`)
+        pushChunk(streamKey, `error.provider provider=${activeProvider} ${e?.message || 'unknown'}`)
+        console.error(`[orch] provider.error provider=${activeProvider} ${e?.message || 'unknown'}`)
         updateState((state) => {
           const run = state.runs.find((r) => r.id === runId)
           if (run) {
@@ -665,7 +713,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           }
           state.streaming.isStreaming = false
         })
-        if (providerRequested) throw new Error(`Provider error: ${e?.message || 'unknown'}`)
+        if (providerRequested) throw new Error(`Provider (${providerRequestedName || activeProvider}) error: ${e?.message || 'unknown'}`)
         break
       }
 

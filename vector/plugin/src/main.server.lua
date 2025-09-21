@@ -33,8 +33,8 @@ _G.__VECTOR_LAST_WORKFLOW_ID = _G.__VECTOR_LAST_WORKFLOW_ID or nil
 local CURRENT_MODE = "agent" -- or "ask"
 
 local MODEL_OPTIONS = {
-	{ id = "server", label = "server (.env)", override = nil },
-	{ id = "gemini-2.5-flash", label = "gemini-2.5-flash", override = "gemini-2.5-flash" },
+	{ id = "openrouter", label = "OpenRouter (.env)", override = nil },
+	{ id = "gemini-2.5-flash", label = "Gemini (direct)", override = "gemini-2.5-flash" },
 }
 
 local function clampModelIndex(idx)
