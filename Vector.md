@@ -1373,7 +1373,7 @@ Optional next steps
 - Plugin (Studio):
   - Load the plugin source at `vector/plugin/src` (via Rojo or manual install).
   - No Studio settings required. Start the backend (`npm run dev`) and configure `.env.local`.
-  - Use the chat dock: send a prompt with an active script open. With no provider, fallbacks will propose a safe edit (insert comment), simple rename, or asset search.
+  - Use the chat dock: send a prompt with an active script open. With no provider, fallbacks will propose a safe edit (insert comment), simple rename, or instruct the provider to create the asset manually when catalog lookup is unavailable.
 - Quick endpoint checks:
   - `GET /api/assets/search?query=test&limit=3` → returns 3 stub items if no catalog provider configured.
   - `POST /api/assets/generate3d` with `{"prompt":"cube"}` → returns a `jobId`.
@@ -1386,7 +1386,8 @@ Optional next steps
   - Start: `orchestrator.start provider=… mode=…`
   - Provider calls: `provider.response turn=X chars=Y` (and console `[orch] provider.ok/error …`)
   - Tool flow: `tool.parsed NAME`, `tool.valid NAME`, `tool.result NAME`, `proposals.mapped NAME count=N`, `context.request REASON`.
-  - Fallbacks: `fallback.edit`, `fallback.object`, `fallback.asset`.
+- Fallbacks: `fallback.edit`, `fallback.object`, `fallback.asset manual_required`, `fallback.asset disabled`.
+- Validation: `search_assets.disabled` emitted when the catalog proxy is missing so the model pivots to manual instance creation.
 - Chat route (`[chat]`): request summary + proposals stored.
 - Assets routes (`[assets.search]`, `[assets.generate3d]`): query, counts, timings.
 - Catalog provider (`[catalog]`): stub vs provider, timings, errors.
