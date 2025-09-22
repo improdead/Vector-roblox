@@ -232,8 +232,9 @@ Assets & 3D
  - search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
  - insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
  - generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
- - If search_assets returns no results or metadata reports a stub/fallback, stop retrying catalog lookups.
- - Switch to manual creation: use create_instance for simple primitives or author Luau via show_diff/apply_edit so the scene still progresses.
+- If search_assets returns no results or metadata reports a stub/fallback, stop retrying catalog lookups.
+- Switch to manual creation: use create_instance for simple primitives or author Luau via show_diff/apply_edit so the scene still progresses.
+- When the user explicitly asks to add/insert/create something and the catalog path fails, you MUST produce the object manually (create_instance or Luau edits) instead of completing.
 
 Validation & recovery
 - On VALIDATION_ERROR, resubmit the SAME tool once with corrected args; no commentary and no tool switching.
@@ -592,6 +593,10 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   pushChunk(streamKey, `orchestrator.start ${startLog}`)
   console.log(`[orch] start ${startLog} msgLen=${msg.length}`)
 
+  let messages: { role: 'user' | 'assistant'; content: string }[] | null = null
+  let assetFallbackWarningSent = false
+  const catalogSearchAvailable = !!process.env.CATALOG_API_URL
+
   const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState } => {
     const annotated = annotateAutoApproval(list, { autoEnabled })
     const totalsIn = taskState.counters.tokensIn
@@ -668,7 +673,12 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     return parts.join('\n')
   }
 
-  if (useProvider && providerSelection && activeProvider) {
+  const fallbacksEnabled = typeof (input as any).enableFallbacks === 'boolean'
+    ? (input as any).enableFallbacks
+    : (process.env.VECTOR_DISABLE_FALLBACKS || '0') !== '1'
+  const fallbacksDisabled = !fallbacksEnabled
+
+  while (useProvider && providerSelection && activeProvider) {
     const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
     const maxTurns = Number(
       typeof input.maxTurns === 'number'
@@ -677,7 +687,11 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           ? 1
           : defaultMaxTurns,
     )
-    const messages: { role: 'user' | 'assistant'; content: string }[] = [{ role: 'user', content: providerFirstMessage }]
+    if (!messages) {
+      messages = [{ role: 'user', content: providerFirstMessage }]
+    }
+    const convo = messages
+    if (!convo) break
     const validationRetryLimit = 2
     const unknownToolRetryLimit = 1
     let unknownToolRetries = 0
@@ -687,7 +701,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       if (contextRequestsThisCall >= contextRequestLimit) return false
       contextRequestsThisCall += 1
       const ask = `CONTEXT_REQUEST ${reason}. Please fetch the relevant context (e.g., run get_active_script or list_selection) before continuing.`
-      messages.push({ role: 'user', content: ask })
+      convo.push({ role: 'user', content: ask })
       appendHistory('system', ask)
       updateState((state) => {
         state.counters.contextRequests += 1
@@ -713,7 +727,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         const resp = activeProvider === 'gemini'
           ? await callGemini({
               systemPrompt: SYSTEM_PROMPT,
-              messages: messages as any,
+              messages: convo as any,
               model: providerSelection.model,
               apiKey: providerSelection.apiKey,
               baseUrl: providerSelection.baseUrl,
@@ -721,7 +735,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
             })
           : await callOpenRouter({
               systemPrompt: SYSTEM_PROMPT,
-              messages: messages as any,
+              messages: convo as any,
               model: providerSelection.model,
               apiKey: providerSelection.apiKey,
               baseUrl: providerSelection.baseUrl,
@@ -759,7 +773,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       if (!tool) {
         // Enforce no-text-only turns: nudge to choose a tool or complete
         const hint = 'NO_TOOL_USED Please emit exactly one tool or call <complete><summary>…</summary></complete> to finish.'
-        messages.push({ role: 'user', content: hint })
+        convo.push({ role: 'user', content: hint })
         appendHistory('system', hint)
         pushChunk(streamKey, 'error.validation no tool call parsed (nudged continue)')
         console.warn('[orch] parse.warn no tool call parsed; nudging to tool or complete')
@@ -799,8 +813,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           pushChunk(streamKey, `error.validation ${String(name)} ${errMsg}`)
           console.warn(`[orch] validation.error tool=${String(name)} ${errMsg}`)
           const validationContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
-          messages.push({ role: 'assistant', content: toolXml })
-          messages.push({ role: 'user', content: validationContent })
+          convo.push({ role: 'assistant', content: toolXml })
+          convo.push({ role: 'user', content: validationContent })
           appendHistory('system', validationContent)
           if (consecutiveValidationErrors > validationRetryLimit) {
             throw new Error(`Validation failed repeatedly for ${String(name)}: ${errMsg}`)
@@ -812,6 +826,17 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           pushChunk(streamKey, `tool.valid ${String(name)}`)
           console.log(`[orch] validation.ok tool=${String(name)}`)
         }
+      }
+
+      if (name === 'search_assets' && !catalogSearchAvailable) {
+        const errMsg = 'catalog_disabled Catalog search is unavailable. Create the requested objects manually using create_instance or Luau edits.'
+        pushChunk(streamKey, `error.validation ${String(name)} catalog_disabled`)
+        console.warn(`[orch] search_assets.disabled catalog unavailable; instructing manual creation`)
+        convo.push({ role: 'assistant', content: toolXml })
+        const validationContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
+        convo.push({ role: 'user', content: validationContent })
+        appendHistory('system', validationContent)
+        continue
       }
 
       const isContextTool =
@@ -848,9 +873,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         setLastTool(input.projectId, String(name), safeResult)
         pushChunk(streamKey, `tool.result ${String(name)}`)
 
-        messages.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'assistant', content: toolXml })
         const resultContent = `TOOL_RESULT ${String(name)}\n` + JSON.stringify(safeResult)
-        messages.push({ role: 'user', content: resultContent })
+        convo.push({ role: 'user', content: resultContent })
         appendHistory('system', resultContent)
         updateState((state) => {
           const ts = Date.now()
@@ -880,9 +905,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         const errMsg = `Unknown tool: ${String(name)}`
         pushChunk(streamKey, `error.validation ${errMsg}`)
         console.warn(`[orch] unknown.tool ${String(name)}`)
-        messages.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'assistant', content: toolXml })
         const errorContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
-        messages.push({ role: 'user', content: errorContent })
+        convo.push({ role: 'user', content: errorContent })
         appendHistory('system', errorContent)
         if (unknownToolRetries > unknownToolRetryLimit) break
         continue
@@ -890,12 +915,20 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
       break
     }
-  }
 
-  const fallbacksEnabled = typeof (input as any).enableFallbacks === 'boolean'
-    ? (input as any).enableFallbacks
-    : (process.env.VECTOR_DISABLE_FALLBACKS || '0') !== '1'
-  const fallbacksDisabled = !fallbacksEnabled
+    if (!fallbacksDisabled && !assetFallbackWarningSent) {
+      const warn = 'CATALOG_UNAVAILABLE Asset catalog lookup failed. Create the requested objects manually using create_instance or Luau edits.'
+      pushChunk(streamKey, 'fallback.asset manual_required')
+      console.log('[orch] fallback.asset manual_required; instructing provider to create manually')
+      appendHistory('assistant', 'fallback: asset search disabled (request manual creation)')
+      convo.push({ role: 'user', content: warn })
+      appendHistory('system', warn)
+      assetFallbackWarningSent = true
+      continue
+    }
+
+    break
+  }
   if (!fallbacksDisabled && input.context.activeScript) {
     const path = input.context.activeScript.path
     const prefixComment = `-- Vector: ${sanitizeComment(msg)}\n`
@@ -943,10 +976,11 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   if (!fallbacksDisabled) {
-    pushChunk(streamKey, 'fallback.asset search')
-    console.log('[orch] fallback.asset search')
-    appendHistory('assistant', 'fallback: asset search')
-    return finalize([{ id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } }])
+    const errMsg = 'ASSET_FALLBACK_DISABLED Asset catalog fallback is disabled. Create the requested objects manually using create_instance or Luau edits.'
+    pushChunk(streamKey, 'fallback.asset disabled')
+    console.warn('[orch] fallback.asset disabled; no proposals after provider warning')
+    appendHistory('system', errMsg)
+    throw new Error('Asset fallback disabled; manual creation required')
   }
   throw new Error('No actionable tool produced within turn limit')
 }

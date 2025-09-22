@@ -34,6 +34,21 @@ export async function POST(req: Request, ctx: { params: { id: string } }) {
       maybeQueueCheckpoint(after.workflowId, after)
     }
   } catch {}
+  const op = typeof body?.op === 'string' ? body.op : undefined
+  if (op === 'create_instance') {
+    const className = typeof body.className === 'string' ? body.className : 'Instance'
+    const parentPath = typeof body.parentPath === 'string' ? body.parentPath : 'unknown'
+    const instancePath = typeof body.path === 'string' ? body.path : undefined
+    if (body?.ok === true) {
+      console.log(
+        `[proposals.apply] create_instance ok class=${className} parent=${parentPath} path=${instancePath || 'n/a'}`,
+      )
+    } else if (body?.ok === false) {
+      console.warn(
+        `[proposals.apply] create_instance failed class=${className} parent=${parentPath} error=${body?.error || 'unknown'}`,
+      )
+    }
+  }
   console.log(
     `[proposals.apply] id=${id} ok=${!!after} workflowId=${after?.workflowId || 'n/a'} payloadKeys=${Object.keys(body || {}).length}`,
   )

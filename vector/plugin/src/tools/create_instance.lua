@@ -112,9 +112,7 @@ return function(className, parentPath, props)
     if not parent then
         return { ok = false, error = "Parent not found: " .. tostring(parentPath) }
     end
-    if not ChangeHistoryService:TryBeginRecording("Vector Create", "Vector Create") then
-        return { ok = false, error = "Cannot start recording" }
-    end
+    local startedRecording = ChangeHistoryService:TryBeginRecording("Vector Create", "Vector Create")
     local ok, res = pcall(function()
         local inst = Instance.new(className)
         if type(props) == "table" then
@@ -133,10 +131,16 @@ return function(className, parentPath, props)
         inst.Parent = parent
         return inst:GetFullName()
     end)
-    ChangeHistoryService:FinishRecording("Vector Create")
+    if startedRecording then
+        ChangeHistoryService:FinishRecording("Vector Create")
+    end
     if ok then
         return { ok = true, path = res }
     else
+        -- If recording was denied earlier, report a clearer message
+        if not startedRecording and tostring(res) == "Cannot start recording" then
+            return { ok = false, error = "Cannot start recording" }
+        end
         return { ok = false, error = tostring(res) }
     end
 end

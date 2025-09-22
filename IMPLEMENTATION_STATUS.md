@@ -14,6 +14,10 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 ## Recent Updates
 
+- Asset fallback removal (August 2026):
+  - Orchestrator no longer emits a catalog `asset_op` fallback when runs end without a tool; instead it streams `fallback.asset manual_required`, injects an error message instructing the model to build the object via Luau/create_instance, and raises `fallback.asset disabled` if the provider still does nothing.
+  - `search_assets` tool calls now return a validation error when the catalog proxy is not configured, pushing models to skip lookup attempts and proceed directly to manual instance creation.
+  - Plugin and backend logs now clearly indicate when manual creation is required because catalog lookup failed or was skipped.
 - Provider selection hardening (July 2026):
   - Added a deterministic provider chooser so OpenRouter and Gemini never mix credentials or model overrides, honoring `VECTOR_DEFAULT_PROVIDER` plus user overrides.
   - Gemini client now enforces type-checked responses and fails fast on empty or safety-blocked completions, keeping the orchestrator from continuing with blank output.
