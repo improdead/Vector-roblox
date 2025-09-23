@@ -14,6 +14,15 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 ## Recent Updates
 
+- Asset fallback removal (August 2026):
+  - Orchestrator no longer emits a catalog `asset_op` fallback when runs end without a tool; instead it streams `fallback.asset manual_required`, injects an error message instructing the model to build the object via Luau/create_instance, and raises `fallback.asset disabled` if the provider still does nothing.
+  - `search_assets` tool calls now return a validation error when the catalog proxy is not configured, pushing models to skip lookup attempts and proceed directly to manual instance creation.
+  - Plugin and backend logs now clearly indicate when manual creation is required because catalog lookup failed or was skipped.
+- Provider selection hardening (July 2026):
+  - Added a deterministic provider chooser so OpenRouter and Gemini never mix credentials or model overrides, honoring `VECTOR_DEFAULT_PROVIDER` plus user overrides.
+  - Gemini client now enforces type-checked responses and fails fast on empty or safety-blocked completions, keeping the orchestrator from continuing with blank output.
+  - Catalog search logging sanitizes queries and emits stub/no-result metadata, while the system prompt spells out when to fall back to manual instance creation.
+  - `.env.example` and `.env.local` were deduplicated with a single provider block covering `GEMINI_*` settings alongside OpenRouter.
 - Checkpoints + conflict loop (July 2026):
   - Automatic per-user-message checkpoints now run after each applied proposal; manual Snapshot/Restore buttons in the plugin call the API, stream status updates, and refresh TaskState metadata.
   - Diff3-powered multi-file apply runs on the server, returning structured conflict hunks when merges fail; the plugin renders those hunks inside the diff viewer and blocks auto-apply.
@@ -225,6 +234,10 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - `OPENROUTER_API_KEY` (required to enable provider path),
     - `OPENROUTER_MODEL` (optional),
     - `VECTOR_USE_OPENROUTER=1` to force provider usage even if the plugin omits credentials.
+  - Gemini direct provider (optional):
+    - `GEMINI_API_KEY` (required to call Gemini directly),
+    - `GEMINI_MODEL`, `GEMINI_API_BASE_URL`, `GEMINI_TIMEOUT_MS` (optional overrides).
+  - `VECTOR_DEFAULT_PROVIDER` selects the default between `openrouter` and `gemini` when no explicit override is supplied.
   - Decide default model(s).
   - Optional: set `VECTOR_MAX_TURNS` (default 4) to control multi-turn depth.
   - Optional: set `OPENROUTER_TIMEOUT_MS` (default 30000) to cap provider calls.

@@ -58,7 +58,7 @@ export type ChatInput = {
     selection?: { className: string; path: string }[]
     openDocs?: { path: string }[]
   }
-  provider?: { name: 'openrouter'; apiKey: string; model?: string; baseUrl?: string }
+  provider?: { name: 'openrouter' | 'gemini'; apiKey: string; model?: string; baseUrl?: string }
   modelOverride?: string | null
   autoApply?: boolean
   mode?: 'ask' | 'agent'
@@ -94,6 +94,7 @@ function computeAnchors(baseText: string, edits: Edit[]): EditAnchors {
 
 // Provider call
 import { callOpenRouter } from './providers/openrouter'
+import { callGemini } from './providers/gemini'
 import { z } from 'zod'
 import { Tools } from '../tools/schemas'
 import { getSession, setLastTool } from '../store/sessions'
@@ -104,6 +105,71 @@ import { TaskState, getTaskState as loadTaskState, updateTaskState } from './tas
 import { extractMentions } from '../context/mentions'
 import { listCodeDefinitionNames, searchFiles } from '../tools/codeIntel'
 import { annotateAutoApproval } from './autoApprove'
+
+type ProviderMode = 'openrouter' | 'gemini'
+
+type ProviderSelection = {
+  mode: ProviderMode
+  apiKey: string
+  model?: string
+  baseUrl?: string
+}
+
+function normalizeString(value?: string | null): string | undefined {
+  const trimmed = typeof value === 'string' ? value.trim() : undefined
+  return trimmed ? trimmed : undefined
+}
+
+function determineProvider(opts: { input: ChatInput; modelOverride?: string | null }): ProviderSelection | null {
+  const { input, modelOverride } = opts
+  const overrideRaw = normalizeString(modelOverride)
+  const overrideIsGemini = !!overrideRaw && overrideRaw.toLowerCase().startsWith('gemini')
+  const defaultProviderEnv = normalizeString(process.env.VECTOR_DEFAULT_PROVIDER)?.toLowerCase()
+  const forceOpenRouter = (process.env.VECTOR_USE_OPENROUTER || '0') === '1'
+
+  const preference: ProviderMode[] = []
+  if (overrideRaw) preference.push(overrideIsGemini ? 'gemini' : 'openrouter')
+  if (input.provider?.name === 'gemini') preference.push('gemini')
+  if (input.provider?.name === 'openrouter') preference.push('openrouter')
+  if (defaultProviderEnv === 'gemini') preference.push('gemini')
+  if (defaultProviderEnv === 'openrouter') preference.push('openrouter')
+  if (forceOpenRouter) preference.push('openrouter')
+  // Ensure we eventually try both providers as fallbacks in a deterministic order
+  preference.push('gemini', 'openrouter')
+
+  const ordered: ProviderMode[] = []
+  for (const mode of preference) {
+    if (!ordered.includes(mode)) ordered.push(mode)
+  }
+
+  for (const mode of ordered) {
+    if (mode === 'openrouter') {
+      const providerInput = input.provider?.name === 'openrouter' ? input.provider : undefined
+      const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.OPENROUTER_API_KEY)
+      if (!apiKey) continue
+      const model =
+        normalizeString(providerInput?.model) ||
+        (overrideRaw && !overrideIsGemini ? overrideRaw : undefined) ||
+        normalizeString(process.env.OPENROUTER_MODEL)
+      const baseUrl = normalizeString(providerInput?.baseUrl)
+      return { mode, apiKey, model, baseUrl }
+    }
+
+    if (mode === 'gemini') {
+      const providerInput = input.provider?.name === 'gemini' ? input.provider : undefined
+      const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.GEMINI_API_KEY)
+      if (!apiKey) continue
+      const model =
+        normalizeString(providerInput?.model) ||
+        (overrideIsGemini ? overrideRaw : undefined) ||
+        normalizeString(process.env.GEMINI_MODEL)
+      const baseUrl = normalizeString(providerInput?.baseUrl) || normalizeString(process.env.GEMINI_API_BASE_URL)
+      return { mode, apiKey, model, baseUrl }
+    }
+  }
+
+  return null
+}
 
 const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
 
@@ -163,9 +229,12 @@ Modes
 - Auto: assume approved small steps; avoid destructive ops; skip actions that require human choice.
 
 Assets & 3D
-- search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
-- insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
-- generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
+ - search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
+ - insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
+ - generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
+- If search_assets returns no results or metadata reports a stub/fallback, stop retrying catalog lookups.
+- Switch to manual creation: use create_instance for simple primitives or author Luau via show_diff/apply_edit so the scene still progresses.
+- When the user explicitly asks to add/insert/create something and the catalog path fails, you MUST produce the object manually (create_instance or Luau edits) instead of completing.
 
 Validation & recovery
 - On VALIDATION_ERROR, resubmit the SAME tool once with corrected args; no commentary and no tool switching.
@@ -514,12 +583,19 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   const selIsContainer = !!selPath && /^(?:game\.(?:Workspace|ReplicatedStorage|ServerStorage|StarterGui|StarterPack|StarterPlayer|Lighting|Teams|SoundService|TextService|CollectionService)|game\.[A-Za-z]+\.[\s\S]+)/.test(selPath)
 
   // Provider gating
-  const providerRequested = !!(input.provider && input.provider.name === 'openrouter' && !!input.provider.apiKey)
-  const useProvider = providerRequested || process.env.VECTOR_USE_OPENROUTER === '1'
+  const providerRequestedName = input.provider?.name
+  const providerRequested = !!normalizeString(input.provider?.apiKey)
+  const providerSelection = determineProvider({ input, modelOverride })
+  const activeProvider = providerSelection?.mode
+  const useProvider = !!providerSelection
   const streamKey = (input as any).workflowId || input.projectId
-  const startLog = `provider=${useProvider ? 'openrouter' : 'fallback'} mode=${input.mode || 'agent'} model=${modelOverride || input.provider?.model || 'default'}`
+  const startLog = `provider=${useProvider ? activeProvider : 'fallback'} mode=${input.mode || 'agent'} model=${providerSelection?.model || 'default'}`
   pushChunk(streamKey, `orchestrator.start ${startLog}`)
   console.log(`[orch] start ${startLog} msgLen=${msg.length}`)
+
+  let messages: { role: 'user' | 'assistant'; content: string }[] | null = null
+  let assetFallbackWarningSent = false
+  const catalogSearchAvailable = !!process.env.CATALOG_API_URL
 
   const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState } => {
     const annotated = annotateAutoApproval(list, { autoEnabled })
@@ -597,7 +673,12 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     return parts.join('\n')
   }
 
-  if (useProvider) {
+  const fallbacksEnabled = typeof (input as any).enableFallbacks === 'boolean'
+    ? (input as any).enableFallbacks
+    : (process.env.VECTOR_DISABLE_FALLBACKS || '0') !== '1'
+  const fallbacksDisabled = !fallbacksEnabled
+
+  while (useProvider && providerSelection && activeProvider) {
     const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
     const maxTurns = Number(
       typeof input.maxTurns === 'number'
@@ -606,7 +687,11 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           ? 1
           : defaultMaxTurns,
     )
-    const messages: { role: 'user' | 'assistant'; content: string }[] = [{ role: 'user', content: providerFirstMessage }]
+    if (!messages) {
+      messages = [{ role: 'user', content: providerFirstMessage }]
+    }
+    const convo = messages
+    if (!convo) break
     const validationRetryLimit = 2
     const unknownToolRetryLimit = 1
     let unknownToolRetries = 0
@@ -616,7 +701,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       if (contextRequestsThisCall >= contextRequestLimit) return false
       contextRequestsThisCall += 1
       const ask = `CONTEXT_REQUEST ${reason}. Please fetch the relevant context (e.g., run get_active_script or list_selection) before continuing.`
-      messages.push({ role: 'user', content: ask })
+      convo.push({ role: 'user', content: ask })
       appendHistory('system', ask)
       updateState((state) => {
         state.counters.contextRequests += 1
@@ -629,21 +714,36 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       const startedAt = Date.now()
       updateState((state) => {
         state.streaming.isStreaming = true
-        state.runs.push({ id: runId, tool: 'provider.call', input: { model: input.provider?.model || modelOverride }, status: 'running', startedAt })
+        state.runs.push({ id: runId, tool: 'provider.call', input: { model: providerSelection?.model }, status: 'running', startedAt })
       })
 
       let content = ''
       try {
-        const resp = await callOpenRouter({
-          systemPrompt: SYSTEM_PROMPT,
-          messages: messages as any,
-          model: input.provider?.model || modelOverride,
-          apiKey: input.provider?.apiKey,
-          baseUrl: input.provider?.baseUrl,
-        })
+        const timeoutMs = Number(
+          activeProvider === 'gemini'
+            ? process.env.GEMINI_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
+            : process.env.OPENROUTER_TIMEOUT_MS || 30000,
+        )
+        const resp = activeProvider === 'gemini'
+          ? await callGemini({
+              systemPrompt: SYSTEM_PROMPT,
+              messages: convo as any,
+              model: providerSelection.model,
+              apiKey: providerSelection.apiKey,
+              baseUrl: providerSelection.baseUrl,
+              timeoutMs,
+            })
+          : await callOpenRouter({
+              systemPrompt: SYSTEM_PROMPT,
+              messages: convo as any,
+              model: providerSelection.model,
+              apiKey: providerSelection.apiKey,
+              baseUrl: providerSelection.baseUrl,
+              timeoutMs,
+            })
         content = resp.content || ''
-        pushChunk(streamKey, `provider.response turn=${turn} chars=${content.length}`)
-        console.log(`[orch] provider.ok turn=${turn} contentLen=${content.length}`)
+        pushChunk(streamKey, `provider.response provider=${activeProvider} turn=${turn} chars=${content.length}`)
+        console.log(`[orch] provider.ok provider=${activeProvider} turn=${turn} contentLen=${content.length}`)
         updateState((state) => {
           const run = state.runs.find((r) => r.id === runId)
           if (run) {
@@ -654,8 +754,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         })
         appendHistory('assistant', content)
       } catch (e: any) {
-        pushChunk(streamKey, `error.provider ${e?.message || 'unknown'}`)
-        console.error(`[orch] provider.error ${e?.message || 'unknown'}`)
+        pushChunk(streamKey, `error.provider provider=${activeProvider} ${e?.message || 'unknown'}`)
+        console.error(`[orch] provider.error provider=${activeProvider} ${e?.message || 'unknown'}`)
         updateState((state) => {
           const run = state.runs.find((r) => r.id === runId)
           if (run) {
@@ -665,7 +765,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           }
           state.streaming.isStreaming = false
         })
-        if (providerRequested) throw new Error(`Provider error: ${e?.message || 'unknown'}`)
+        if (providerRequested) throw new Error(`Provider (${providerRequestedName || activeProvider}) error: ${e?.message || 'unknown'}`)
         break
       }
 
@@ -673,7 +773,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       if (!tool) {
         // Enforce no-text-only turns: nudge to choose a tool or complete
         const hint = 'NO_TOOL_USED Please emit exactly one tool or call <complete><summary>…</summary></complete> to finish.'
-        messages.push({ role: 'user', content: hint })
+        convo.push({ role: 'user', content: hint })
         appendHistory('system', hint)
         pushChunk(streamKey, 'error.validation no tool call parsed (nudged continue)')
         console.warn('[orch] parse.warn no tool call parsed; nudging to tool or complete')
@@ -713,8 +813,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           pushChunk(streamKey, `error.validation ${String(name)} ${errMsg}`)
           console.warn(`[orch] validation.error tool=${String(name)} ${errMsg}`)
           const validationContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
-          messages.push({ role: 'assistant', content: toolXml })
-          messages.push({ role: 'user', content: validationContent })
+          convo.push({ role: 'assistant', content: toolXml })
+          convo.push({ role: 'user', content: validationContent })
           appendHistory('system', validationContent)
           if (consecutiveValidationErrors > validationRetryLimit) {
             throw new Error(`Validation failed repeatedly for ${String(name)}: ${errMsg}`)
@@ -726,6 +826,17 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           pushChunk(streamKey, `tool.valid ${String(name)}`)
           console.log(`[orch] validation.ok tool=${String(name)}`)
         }
+      }
+
+      if (name === 'search_assets' && !catalogSearchAvailable) {
+        const errMsg = 'catalog_disabled Catalog search is unavailable. Create the requested objects manually using create_instance or Luau edits.'
+        pushChunk(streamKey, `error.validation ${String(name)} catalog_disabled`)
+        console.warn(`[orch] search_assets.disabled catalog unavailable; instructing manual creation`)
+        convo.push({ role: 'assistant', content: toolXml })
+        const validationContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
+        convo.push({ role: 'user', content: validationContent })
+        appendHistory('system', validationContent)
+        continue
       }
 
       const isContextTool =
@@ -762,9 +873,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         setLastTool(input.projectId, String(name), safeResult)
         pushChunk(streamKey, `tool.result ${String(name)}`)
 
-        messages.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'assistant', content: toolXml })
         const resultContent = `TOOL_RESULT ${String(name)}\n` + JSON.stringify(safeResult)
-        messages.push({ role: 'user', content: resultContent })
+        convo.push({ role: 'user', content: resultContent })
         appendHistory('system', resultContent)
         updateState((state) => {
           const ts = Date.now()
@@ -794,9 +905,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         const errMsg = `Unknown tool: ${String(name)}`
         pushChunk(streamKey, `error.validation ${errMsg}`)
         console.warn(`[orch] unknown.tool ${String(name)}`)
-        messages.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'assistant', content: toolXml })
         const errorContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
-        messages.push({ role: 'user', content: errorContent })
+        convo.push({ role: 'user', content: errorContent })
         appendHistory('system', errorContent)
         if (unknownToolRetries > unknownToolRetryLimit) break
         continue
@@ -804,12 +915,20 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
       break
     }
-  }
 
-  const fallbacksEnabled = typeof (input as any).enableFallbacks === 'boolean'
-    ? (input as any).enableFallbacks
-    : (process.env.VECTOR_DISABLE_FALLBACKS || '0') !== '1'
-  const fallbacksDisabled = !fallbacksEnabled
+    if (!fallbacksDisabled && !assetFallbackWarningSent) {
+      const warn = 'CATALOG_UNAVAILABLE Asset catalog lookup failed. Create the requested objects manually using create_instance or Luau edits.'
+      pushChunk(streamKey, 'fallback.asset manual_required')
+      console.log('[orch] fallback.asset manual_required; instructing provider to create manually')
+      appendHistory('assistant', 'fallback: asset search disabled (request manual creation)')
+      convo.push({ role: 'user', content: warn })
+      appendHistory('system', warn)
+      assetFallbackWarningSent = true
+      continue
+    }
+
+    break
+  }
   if (!fallbacksDisabled && input.context.activeScript) {
     const path = input.context.activeScript.path
     const prefixComment = `-- Vector: ${sanitizeComment(msg)}\n`
@@ -857,10 +976,11 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   if (!fallbacksDisabled) {
-    pushChunk(streamKey, 'fallback.asset search')
-    console.log('[orch] fallback.asset search')
-    appendHistory('assistant', 'fallback: asset search')
-    return finalize([{ id: id('asset'), type: 'asset_op', search: { query: msg || 'button', limit: 6 } }])
+    const errMsg = 'ASSET_FALLBACK_DISABLED Asset catalog fallback is disabled. Create the requested objects manually using create_instance or Luau edits.'
+    pushChunk(streamKey, 'fallback.asset disabled')
+    console.warn('[orch] fallback.asset disabled; no proposals after provider warning')
+    appendHistory('system', errMsg)
+    throw new Error('Asset fallback disabled; manual creation required')
   }
   throw new Error('No actionable tool produced within turn limit')
 }

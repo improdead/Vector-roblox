@@ -33,8 +33,8 @@ _G.__VECTOR_LAST_WORKFLOW_ID = _G.__VECTOR_LAST_WORKFLOW_ID or nil
 local CURRENT_MODE = "agent" -- or "ask"
 
 local MODEL_OPTIONS = {
-	{ id = "server", label = "server (.env)", override = nil },
-	{ id = "gemini-2.5-flash", label = "gemini-2.5-flash", override = "gemini-2.5-flash" },
+	{ id = "openrouter", label = "OpenRouter (.env)", override = nil },
+	{ id = "gemini-2.5-flash", label = "Gemini (direct)", override = "gemini-2.5-flash" },
 }
 
 local function clampModelIndex(idx)
@@ -90,11 +90,10 @@ local function requestScriptPermission()
     probe.Source = "-- Vector permission probe"
     probe.Parent = ServerStorage
 
-    if not ChangeHistoryService:TryBeginRecording("Vector Permission Probe", "Vector Permission Probe") then
-        probe:Destroy()
-        return false, "ChangeHistoryService denied recording"
-    end
+    local startedRecording = ChangeHistoryService:TryBeginRecording("Vector Permission Probe", "Vector Permission Probe")
 
+    -- Always attempt a ScriptEditor write to trigger the permission prompt even
+    -- if ChangeHistoryService refused to start a recording.
     local ok, err = pcall(function()
         if ScriptEditorService.UpdateSourceAsync then
             ScriptEditorService:UpdateSourceAsync(probe, function(old)
@@ -106,14 +105,16 @@ local function requestScriptPermission()
         end
     end)
 
-    ChangeHistoryService:FinishRecording("Vector Permission Probe")
+    if startedRecording then
+        pcall(function() ChangeHistoryService:FinishRecording("Vector Permission Probe") end)
+    end
     probe:Destroy()
 
     if ok then
         _G.__VECTOR_PERMISSION_OK = true
         return true
     else
-        return false, tostring(err)
+        return false, tostring(err or "permission_denied")
     end
 end
 

@@ -951,6 +951,7 @@ vector/
 
 Recent updates
 
+- 2026-07: Hardened provider selection — deterministic chooser between OpenRouter and Gemini (`VECTOR_DEFAULT_PROVIDER`, override precedence, env fallbacks), Gemini client safety checks (empty/safety finishes fail fast), sanitized catalog logging, and prompt guidance for manual scene creation when catalog search stubs out.
 - 2026-07: Shipped checkpoint snapshots/restore, diff3-powered multi-file apply + conflict hunks, and the TaskState-driven progress UI (per-message auto checkpoints, manual Snapshot/Restore buttons in the plugin, run badges, token telemetry, and streamed conflict previews).
 - 2026-06: Composer UI rebuilt to match reference mockup (attachment chips, inline auto toggle, model selector, quick menu) and auto mode now auto-inserts catalog assets.
 - 2026-06: Model override pipeline added (`modelOverride` from plugin → API → orchestrator) with Gemini 2.5 Flash option in the Studio UI.
@@ -975,7 +976,7 @@ Next focus (July 2026)
 Decisions captured
 
 - AI name: Vector (assistant name in UI and comments)
-- LLM provider: OpenRouter; server default `OPENROUTER_MODEL` (currently moonshotai/kimi-k2:free) with plugin override option for `gemini-2.5-flash` via model selector.
+- LLM providers: OpenRouter (default) with optional direct Gemini integration; `VECTOR_DEFAULT_PROVIDER`, plugin overrides, and env keys decide which client runs each request.
 - Package manager: npm
 - Hosting: Local dev at http://127.0.0.1:3000 for now. We will move to Vercel (or similar) later.
 - Domain permissions: local-only for now; will add hosted domain later when deploying.
@@ -1016,9 +1017,14 @@ Working now
   - `OPENROUTER_API_KEY=` (leave blank to use fallbacks)
   - `OPENROUTER_MODEL=moonshotai/kimi-k2:free`
   - `VECTOR_USE_OPENROUTER=0` (set to `1` to enable provider)
+  - `VECTOR_DEFAULT_PROVIDER=openrouter` (choose `openrouter` or `gemini` when no override is supplied)
   - `OPENROUTER_MAX_RETRIES=3` (optional retry count; default 3)
   - `OPENROUTER_RETRY_DELAY_MS=1000` (initial backoff in ms; default 1000)
   - `OPENROUTER_RETRY_MAX_MS=10000` (max backoff cap in ms; default 10000)
+  - `GEMINI_API_KEY=` (optional; required for direct Gemini calls)
+  - `GEMINI_MODEL=gemini-2.5-flash`
+  - `GEMINI_API_BASE_URL=` (optional proxy endpoint)
+  - `GEMINI_TIMEOUT_MS=30000`
   - `VECTOR_WORKSPACE_ROOT=` (optional absolute path override for `@file/@folder` and search tools)
   - `VECTOR_PROBLEMS_FILE=` (optional absolute/relative path for `@problems` mention; defaults to `<root>/problems.log`)
 - Transport & Security:
@@ -1367,7 +1373,7 @@ Optional next steps
 - Plugin (Studio):
   - Load the plugin source at `vector/plugin/src` (via Rojo or manual install).
   - No Studio settings required. Start the backend (`npm run dev`) and configure `.env.local`.
-  - Use the chat dock: send a prompt with an active script open. With no provider, fallbacks will propose a safe edit (insert comment), simple rename, or asset search.
+  - Use the chat dock: send a prompt with an active script open. With no provider, fallbacks will propose a safe edit (insert comment), simple rename, or instruct the provider to create the asset manually when catalog lookup is unavailable.
 - Quick endpoint checks:
   - `GET /api/assets/search?query=test&limit=3` → returns 3 stub items if no catalog provider configured.
   - `POST /api/assets/generate3d` with `{"prompt":"cube"}` → returns a `jobId`.
@@ -1380,7 +1386,8 @@ Optional next steps
   - Start: `orchestrator.start provider=… mode=…`
   - Provider calls: `provider.response turn=X chars=Y` (and console `[orch] provider.ok/error …`)
   - Tool flow: `tool.parsed NAME`, `tool.valid NAME`, `tool.result NAME`, `proposals.mapped NAME count=N`, `context.request REASON`.
-  - Fallbacks: `fallback.edit`, `fallback.object`, `fallback.asset`.
+- Fallbacks: `fallback.edit`, `fallback.object`, `fallback.asset manual_required`, `fallback.asset disabled`.
+- Validation: `search_assets.disabled` emitted when the catalog proxy is missing so the model pivots to manual instance creation.
 - Chat route (`[chat]`): request summary + proposals stored.
 - Assets routes (`[assets.search]`, `[assets.generate3d]`): query, counts, timings.
 - Catalog provider (`[catalog]`): stub vs provider, timings, errors.
