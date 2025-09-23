@@ -31,44 +31,42 @@ Vector follows a **runtime split**: the backend (Next.js on Vercel or local) han
 flowchart TD
     %% User and Studio Plugin
     subgraph Studio_Plugin["Roblox Studio Plugin (Luau)"]
-        UI[Chat UI + Composer] --> ContextCollector["Context Collector\n(Active Script, Selection)"]
+        UI[Chat UI + Composer] --> ContextCollector["Context Collector<br/>(Active Script, Selection)"]
         ContextCollector --> ChatAPI["/api/chat POST"]
-        ChatAPI --> ProposalRenderer["Proposal Renderer\n(Diffs/Ops Preview)"]
+        ChatAPI --> ProposalRenderer["Proposal Renderer<br/>(Diffs/Ops Preview)"]
         ProposalRenderer --> ApprovalGate{User Approves?}
-        ApprovalGate -- Yes --> ToolExecutor["Tool Executor\n(Apply Edit / Insert Asset)"]
-        ToolExecutor --> ChangeHistory["ChangeHistoryService\n(Undo Step)"]
+        ApprovalGate -- Yes --> ToolExecutor["Tool Executor<br/>(Apply Edit / Insert Asset)"]
+        ToolExecutor --> ChangeHistory["ChangeHistoryService<br/>(Undo Step)"]
         ChangeHistory --> ApplyAPI["/api/proposals/:id/apply POST"]
         ApprovalGate -- No --> Reject[Reject Proposal]
-        StreamPoller["/api/stream Long-Poll"] --> StatusUI["Status Panel\n(Streaming Updates)"]
+        StreamPoller["/api/stream Long-Poll"] --> StatusUI["Status Panel<br/>(Streaming Updates)"]
     end
 
     %% Backend and Orchestrator
     subgraph Backend["Next.js Backend (TypeScript)"]
         ChatAPI --> Orchestrator[LLM Orchestrator]
         Orchestrator --> SystemPrompt[System Prompt + Tool Registry]
-        SystemPrompt --> LLM["LLM Provider\n(OpenRouter / Gemini)"]
+        SystemPrompt --> LLM["LLM Provider<br/>(OpenRouter / Gemini)"]
         LLM --> ToolParser[Tool Call Parser]
-        ToolParser --> ProposalBuilder["Proposal Builder\n(Edits / Object Ops / Asset Ops)"]
+        ToolParser --> ProposalBuilder["Proposal Builder<br/>(Edits / Object Ops / Asset Ops)"]
         ProposalBuilder --> ChatAPI
-        ProposalBuilder --> ProposalsStore[("Proposals Store\n(JSON / DB)")]
+        ProposalBuilder --> ProposalsStore[("Proposals Store<br/>(JSON / DB)")]
         ApplyAPI --> ProposalsStore
-        StreamPoller --> StreamBus["Stream Bus\n(Events: Tool Results, Errors)"]
+        StreamPoller --> StreamBus["Stream Bus<br/>(Events: Tool Results, Errors)"]
         StreamBus --> StatusUI
-
-        %% Asset and External Integrations
-        AssetSearchAPI["/api/assets/search GET"] --> CatalogProvider["Catalog Provider\n(Roblox API / Stub)"]
+        AssetSearchAPI["/api/assets/search GET"] --> CatalogProvider["Catalog Provider<br/>(Roblox API / Stub)"]
         CatalogProvider --> Orchestrator
-        Generate3DAPI["/api/assets/generate3d POST"] --> MeshyAPI["Meshy API\n(Text-to-3D)"]
-        MeshyAPI --> OpenCloud["Roblox Open Cloud\n(Asset Upload)"]
+        Generate3DAPI["/api/assets/generate3d POST"] --> MeshyAPI["Meshy API<br/>(Text-to-3D)"]
+        MeshyAPI --> OpenCloud["Roblox Open Cloud<br/>(Asset Upload)"]
         OpenCloud --> Orchestrator
     end
 
     %% Context and Memory
     subgraph Context_Memory["Context and Memory"]
-        Orchestrator --> ContextManager["Context Manager\n(Token Tracking, Summarization)"]
-        ContextManager --> ToolCache[("Tool Result Cache\n(Fingerprints + TTL)")]
+        Orchestrator --> ContextManager["Context Manager<br/>(Token Tracking, Summarization)"]
+        ContextManager --> ToolCache[("Tool Result Cache<br/>(Fingerprints + TTL)")]
         ToolCache --> Orchestrator
-        ProposalsStore --> WorkflowLedger[("Workflow Ledger\n(Steps, Fingerprints, Audit)")]
+        ProposalsStore --> WorkflowLedger[("Workflow Ledger<br/>(Steps, Fingerprints, Audit)")]
         WorkflowLedger --> ContextManager
     end
 
@@ -78,10 +76,14 @@ flowchart TD
     LLM --> StreamBus
     ContextCollector --> ContextManager
 
-    %% Notes
-    note right of ApprovalGate: Approval required for all writes\nOne undo step per apply
-    note right of Orchestrator: One tool per LLM message\nDeterministic fallbacks on errors
-    note right of StreamBus: Long-poll for Studio\nSSE for dashboards
+    %% Notes as side nodes (valid on GitHub)
+    ApprovalGate -.-> Note1["📌 Approval required for all writes<br/>One undo step per apply"]:::note
+    Orchestrator -.-> Note2["📌 One tool per LLM message<br/>Deterministic fallbacks on errors"]:::note
+    StreamBus -.-> Note3["📌 Long-poll for Studio<br/>SSE for dashboards"]:::note
+
+    %% Styles
+    classDef note fill:#f5f5f7,stroke:#c7c7cc,color:#111,stroke-width:1px,font-style:italic;
+
 ```
 
 This diagram illustrates the core data flow, runtime components, and integrations. The plugin handles UI and Roblox writes; the backend manages LLM orchestration, asset search/generation, and persistence.
