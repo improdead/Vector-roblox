@@ -19,6 +19,24 @@ const ChatSchema = z.object({
     activeScript: z.object({ path: z.string(), text: z.string() }).nullable().optional(),
     selection: z.array(z.object({ className: z.string(), path: z.string() })).optional(),
     openDocs: z.array(z.object({ path: z.string() })).optional(),
+    scene: z
+      .object({
+        nodes: z
+          .array(
+            z.object({
+              path: z.string(),
+              className: z.string(),
+              name: z.string(),
+              parentPath: z.string().optional(),
+              props: z.record(z.any()).optional(),
+            }),
+          )
+          .optional(),
+      })
+      .optional(),
+    codeDefinitions: z
+      .array(z.object({ file: z.string(), line: z.number().int().min(1), name: z.string().min(1) }))
+      .optional(),
   }),
   provider: ProviderSchema,
   modelOverride: z.string().min(1).optional(),

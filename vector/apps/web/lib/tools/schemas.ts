@@ -24,6 +24,39 @@ export const Tools = {
   get_active_script: z.object({}),
   list_selection: z.object({}),
   list_open_documents: z.object({ maxCount: z.number().min(1).max(100).optional() }),
+  open_or_create_script: z
+    .object({
+      path: z.string().min(1).optional(),
+      parentPath: z.string().min(1).optional(),
+      name: z.string().min(1).optional(),
+    })
+    .superRefine((value, ctx) => {
+      if (!value.path && !(value.parentPath && value.name)) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, message: 'Provide path or (parentPath + name)' })
+      }
+    }),
+  start_plan: z.object({
+    steps: z.array(z.string()).min(1),
+  }),
+  update_plan: z.object({
+    completedStep: z.string().optional(),
+    nextStep: z.string().optional(),
+    notes: z.string().optional(),
+  }),
+  // Scene/context discovery helpers (Roblox plugin-backed)
+  list_children: z.object({
+    parentPath: z.string(),
+    depth: z.number().min(0).max(10).optional(),
+    maxNodes: z.number().min(1).max(2000).optional(),
+    // Accept a simple record like { "Part": true, "Model": true }
+    classWhitelist: z.record(z.boolean()).optional(),
+  }),
+  get_properties: z.object({
+    path: z.string(),
+    keys: z.array(z.string()).optional(),
+    includeAllAttributes: z.boolean().optional(),
+    maxBytes: z.number().min(1).max(1_000_000).optional(),
+  }),
   show_diff: z.object({ path: z.string(), edits: z.array(Edit) }),
   apply_edit: z.object({ path: z.string(), edits: z.array(Edit) }),
   create_instance: z
@@ -41,7 +74,7 @@ export const Tools = {
   generate_asset_3d: z.object({ prompt: z.string(), tags: z.array(z.string()).optional(), style: z.string().optional(), budget: z.number().optional() }),
   list_code_definition_names: z.object({
     root: z.string().optional(),
-    limit: z.number().min(1).max(500).optional(),
+    limit: z.number().min(1).max(1000).optional(),
     exts: z.array(z.string()).optional(),
   }),
   search_files: z.object({
@@ -56,6 +89,16 @@ export const Tools = {
   complete: z.object({
     summary: z.string().min(1),
     confidence: z.number().min(0).max(1).optional(),
+  }),
+  // Ask-mode friendly final message for UI transcript (optional)
+  final_message: z.object({
+    text: z.string().min(1),
+    confidence: z.number().min(0).max(1).optional(),
+  }),
+  // Streaming-style message with a phase (start|update|final)
+  message: z.object({
+    text: z.string().min(1),
+    phase: z.enum(['start', 'update', 'final']).optional(),
   }),
   // Alias for compatibility with Cline terminology
   attempt_completion: z.object({

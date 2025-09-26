@@ -11,6 +11,88 @@ const DEFAULT_EXTS = ['.lua', '.luau', '.ts', '.tsx', '.js', '.jsx', '.json']
 export type DefinitionInfo = { file: string; line: number; name: string }
 export type SearchHit = { file: string; line: number; snippet: string }
 
+const definitionCache = new Map<string, DefinitionInfo[]>()
+
+function clamp(value: number, minValue: number, maxValue: number): number {
+  if (value < minValue) return minValue
+  if (value > maxValue) return maxValue
+  return value
+}
+
+function sanitizeDefinition(entry: any): DefinitionInfo | null {
+  if (!entry || typeof entry !== 'object') return null
+  const file = typeof entry.file === 'string'
+    ? entry.file
+    : typeof entry.path === 'string'
+      ? entry.path
+      : undefined
+  if (!file) return null
+  const name = typeof entry.name === 'string' && entry.name.trim().length > 0 ? entry.name.trim() : null
+  if (!name) return null
+  const rawLine = typeof entry.line === 'number' ? entry.line : Number(entry.line)
+  if (!Number.isFinite(rawLine)) return null
+  const line = clamp(Math.floor(rawLine), 1, 1_000_000)
+  return { file, line, name }
+}
+
+function normalizeExts(exts?: string[]): string[] {
+  if (!Array.isArray(exts)) return []
+  const out: string[] = []
+  for (const ext of exts) {
+    if (typeof ext !== 'string') continue
+    const trimmed = ext.trim()
+    if (!trimmed) continue
+    out.push(trimmed.startsWith('.') ? trimmed.toLowerCase() : `.${trimmed.toLowerCase()}`)
+  }
+  return out
+}
+
+export function setCodeDefinitionCache(taskId: string | undefined, entries: Iterable<any> | null | undefined): DefinitionInfo[] {
+  if (!taskId) return []
+  const sanitized: DefinitionInfo[] = []
+  const seen = new Set<string>()
+  if (entries) {
+    for (const entry of entries) {
+      const info = sanitizeDefinition(entry)
+      if (!info) continue
+      const dedupeKey = `${info.file}::${info.line}::${info.name}`
+      if (seen.has(dedupeKey)) continue
+      seen.add(dedupeKey)
+      sanitized.push(info)
+    }
+  }
+  definitionCache.set(taskId, sanitized)
+  return sanitized
+}
+
+export function getCodeDefinitionCache(taskId: string | undefined): DefinitionInfo[] {
+  if (!taskId) return []
+  return definitionCache.get(taskId) ?? []
+}
+
+function filterByRoot(defs: DefinitionInfo[], root?: string): DefinitionInfo[] {
+  const trimmed = typeof root === 'string' ? root.trim() : ''
+  if (!trimmed) return defs
+  const needle = trimmed.toLowerCase()
+  const altNeedle = needle.startsWith('game.') ? needle.slice(5) : `game.${needle}`
+  return defs.filter(({ file }) => {
+    const haystack = file.toLowerCase()
+    if (haystack.includes(needle)) return true
+    if (altNeedle && haystack.includes(altNeedle)) return true
+    return false
+  })
+}
+
+function filterByExts(defs: DefinitionInfo[], exts: string[]): DefinitionInfo[] {
+  if (!exts.length) return defs
+  const hasLuauExt = exts.some((ext) => ext === '.lua' || ext === '.luau')
+  return defs.filter(({ file }) => {
+    if (hasLuauExt) return true
+    const lower = file.toLowerCase()
+    return exts.some((ext) => lower.endsWith(ext))
+  })
+}
+
 function isIgnored(dirName: string): boolean {
   return IGNORE_DIRS.has(dirName)
 }
@@ -43,32 +125,14 @@ function enumerateFiles(root: string, limit: number, exts: string[]): string[] {
   return out
 }
 
-export function listCodeDefinitionNames(opts: { root?: string; limit?: number; exts?: string[] } = {}): DefinitionInfo[] {
-  const root = opts.root ? path.resolve(DEFAULT_ROOT, opts.root) : DEFAULT_ROOT
-  const limit = Math.min(Math.max(opts.limit ?? 200, 1), 1000)
-  const exts = opts.exts && opts.exts.length ? opts.exts.map((e) => (e.startsWith('.') ? e : `.${e}`)) : DEFAULT_EXTS
-  const files = enumerateFiles(root, limit, exts)
-  const defs: DefinitionInfo[] = []
-  const funcRegex = /(function\s+([A-Za-z0-9_.:]+))|(local\s+function\s+([A-Za-z0-9_.:]+))/g
-  files.forEach((file) => {
-    try {
-      const text = fs.readFileSync(file, 'utf-8')
-      const lines = text.split(/\r?\n/)
-      lines.forEach((line, idx) => {
-        funcRegex.lastIndex = 0
-        const match = funcRegex.exec(line)
-        if (match) {
-          const name = match[2] || match[4]
-          if (name) {
-            defs.push({ file: path.relative(DEFAULT_ROOT, file), line: idx + 1, name })
-          }
-        }
-      })
-    } catch {
-      /* noop */
-    }
-  })
-  return defs.slice(0, limit)
+export function listCodeDefinitionNames(taskId: string | undefined, opts: { root?: string; limit?: number; exts?: string[] } = {}): DefinitionInfo[] {
+  const limit = clamp(Math.floor(opts.limit ?? 200), 1, 1000)
+  const defs = taskId ? definitionCache.get(taskId) ?? [] : []
+  if (!defs.length) return []
+  const filteredByRoot = filterByRoot(defs, opts.root)
+  const exts = normalizeExts(opts.exts)
+  const filtered = filterByExts(filteredByRoot, exts)
+  return filtered.slice(0, limit)
 }
 
 export function searchFiles(opts: { query: string; root?: string; limit?: number; exts?: string[] } & { caseSensitive?: boolean }): SearchHit[] {

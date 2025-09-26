@@ -9,6 +9,7 @@
 * **Studio Plugin (Luau)**: docked chat + proposals, reads active editor state, previews diffs, applies edits inside **ChangeHistoryService**. Provider configuration is read from the backend `.env`.
 * **Next.js Backend (TypeScript)**: `/api/chat`, `/api/stream`, `/api/proposals/:id/apply`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM.
 * **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval. Streaming includes clear indicators: `orchestrator.start …`, `tool.parsed <name>`, `tool.valid <name>`, `tool.result <name>`, `proposals.mapped <name> count=N`, `context.request <reason>`, and `error.*`.
+  - Ask mode UI: a single transcript shows assistant text bubbles and compact tool chips. Completion proposals are echoed as assistant text; in Auto mode proposals auto-apply and render as chips only.
 
 ---
 
@@ -31,6 +32,11 @@ Wait for each tool result before the next step.
 - get_active_script()
 - list_selection()
 - list_open_documents(maxCount?)
+- open_or_create_script(path, parentPath?, name?)
+- start_plan(steps[])
+- update_plan(completedStep?, nextStep?, notes?)
+- list_children(parentPath, depth?, maxNodes?, classWhitelist?)
+- get_properties(path, keys?, includeAllAttributes?, maxBytes?)
 - show_diff(path, edits[])
 - apply_edit(path, edits[])
 - create_instance(className,parentPath,props)
@@ -52,6 +58,28 @@ Rules:
 - Existing special characters can be referenced with bracket segments: `game.Workspace["My.Part"]["Wall [A]"]`.
  - Selection defaults: when a single instance is selected in Studio, infer missing `path`/`parentPath` for common tools (rename/set/delete/create/insert) using that selection; otherwise default to `game.Workspace`.
  - Edit constraints: keep edits sorted and non‑overlapping; cap size (≤20 edits, ≤2000 inserted characters).
+- Discovery defaults: when unsure where to act, use `list_open_documents`, `list_children`, `get_properties`, `list_code_definition_names`, and `search_files` before proposing edits.
+- Each chat request now includes a bounded `scene` snapshot of `Workspace` (path/class/Name + basic props) so the orchestrator has a baseline for `list_children` / `get_properties`.
+- Planning is mandatory: emit `<start_plan>` with an ordered step list before any action; use `<update_plan>` to mark progress/notes.
+- Completion gate: every build that creates new geometry must also emit Luau code (Script/ModuleScript or repo `.lua/.luau`) so the structure can be rebuilt; the orchestrator blocks `<complete>` until that code exists.
+
+### Embedded planning and examples
+
+To keep `index.ts` concise, planner guidance and reference examples now live in:
+
+- `apps/web/lib/orchestrator/prompts/examples.ts`
+  - `PLANNER_GUIDE`: high-level planning heuristics for decomposing user goals
+  - `QUALITY_CHECK_GUIDE`: checklist expectations that gate completion
+  - `EXAMPLE_HOUSE_SMALL`: container + floor + four walls + roof sequence
+  - `EXAMPLE_VEHICLE_CART`: chassis + wheel template
+  - `EXAMPLE_FARM_SCRIPT`: plan + script workflow that rebuilds a farm via Luau
+
+`index.ts` concatenates these strings onto `SYSTEM_PROMPT` at build time, so the model sees them, while we keep the source organized.
+
+### Ask-mode text and transcript
+- The system supports `message(text, phase)` where phase is `start|update|final` for streaming-style text.
+- The orchestrator emits `assistant.start`, `assistant.update`, and `assistant.final` stream lines. `final_message(text)` remains a shorthand that maps to a completion and emits `assistant.final`.
+- The plugin renders this as a normal assistant text bubble in the single transcript alongside compact tool chips.
 
 Roblox typed values (wrappers)
 - Use `__t` wrappers for structured types in `props`:
@@ -225,7 +253,16 @@ const ChatSchema = z.object({
   context: z.object({
     activeScript: z.object({ path: z.string(), text: z.string() }).nullable().optional(),
     selection: z.array(z.object({ className: z.string(), path: z.string() })).optional(),
-    openDocs: z.array(z.object({ path: z.string() })).optional()
+    openDocs: z.array(z.object({ path: z.string() })).optional(),
+    scene: z.object({
+      nodes: z.array(z.object({
+        path: z.string(),
+        className: z.string(),
+        name: z.string(),
+        parentPath: z.string().optional(),
+        props: z.record(z.unknown()).optional(),
+      })).optional(),
+    }).optional(),
   }),
   autoApply: z.boolean().optional()
 })
@@ -584,6 +621,9 @@ Wait for each tool result before the next step.
 | ----------------------------- | --------------------------------------- | ------------- | ------------------------------------ | ------------- |
 | `get_active_script()`         | Read active editor tab content reliably | —             | `{ path, text, isDirty }`            | Plugin (Luau) |
 | `list_open_documents(maxCount?)` | Enumerate open `ScriptDocument`s     | `maxCount?`   | `[{ path, isDirty }]`                | Plugin        |
+| `open_or_create_script(path,parentPath?,name?)` | Guarantee a Script exists and return its Source | `path` or `parentPath`+`name` | `{ path, text, created }` | Backend → proposal + plugin |
+| `start_plan(steps[])`            | Declare ordered steps before acting    | `steps[]`      | `{ steps }`                          | Orchestrator  |
+| `update_plan(completedStep?,nextStep?,notes?)` | Track plan progress / notes           | `completedStep?, nextStep?, notes?` | `{ completedStep?, nextStep?, notes? }` | Orchestrator |
 | `list_selection()`            | Current Selection metadata              | —             | `[{ className, name, path, props }]` | Plugin        |
 | `list_children(path)`         | Explore hierarchy under a node          | `path`        | `[{ className, name, path }]`        | Plugin        |
 | `get_properties(path, keys?)` | Read specific props for an Instance     | `path, keys?` | `{ key:value }`                      | Plugin        |

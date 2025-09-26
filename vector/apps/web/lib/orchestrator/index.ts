@@ -57,6 +57,8 @@ export type ChatInput = {
     activeScript?: { path: string; text: string } | null
     selection?: { className: string; path: string }[]
     openDocs?: { path: string }[]
+    scene?: { nodes?: { path: string; className: string; name: string; parentPath?: string; props?: Record<string, unknown> }[] }
+    codeDefinitions?: { file: string; line: number; name: string }[]
   }
   provider?: { name: 'openrouter' | 'gemini'; apiKey: string; model?: string; baseUrl?: string }
   modelOverride?: string | null
@@ -97,14 +99,31 @@ import { callOpenRouter } from './providers/openrouter'
 import { callGemini } from './providers/gemini'
 import { z } from 'zod'
 import { Tools } from '../tools/schemas'
-import { getSession, setLastTool } from '../store/sessions'
+import { setLastTool } from '../store/sessions'
 import { pushChunk } from '../store/stream'
 import { applyRangeEdits, simpleUnifiedDiff } from '../diff/rangeEdits'
 import crypto from 'node:crypto'
-import { TaskState, getTaskState as loadTaskState, updateTaskState } from './taskState'
+import { ScriptPolicyState, TaskState, getTaskState as loadTaskState, updateTaskState } from './taskState'
 import { extractMentions } from '../context/mentions'
-import { listCodeDefinitionNames, searchFiles } from '../tools/codeIntel'
+import { listCodeDefinitionNames, searchFiles, setCodeDefinitionCache } from '../tools/codeIntel'
+import type { DefinitionInfo } from '../tools/codeIntel'
 import { annotateAutoApproval } from './autoApprove'
+import {
+  PLANNER_GUIDE,
+  QUALITY_CHECK_GUIDE,
+  EXAMPLE_FARM_SCRIPT,
+  COMPLEXITY_DECISION_GUIDE,
+  TOOL_REFERENCE,
+  ROLE_SCOPE_GUIDE,
+} from './prompts/examples'
+import {
+  buildInstancePath,
+  splitInstancePath,
+  listSceneChildren,
+  getSceneProperties,
+  applyObjectOpsPreview,
+  hydrateSceneSnapshot,
+} from './sceneGraph'
 
 type ProviderMode = 'openrouter' | 'gemini'
 
@@ -115,11 +134,107 @@ type ProviderSelection = {
   baseUrl?: string
 }
 
+const SCRIPT_CLASS_NAMES = new Set(['Script', 'LocalScript', 'ModuleScript'])
+const PART_CLASS_NAMES = new Set([
+  'Part',
+  'MeshPart',
+  'UnionOperation',
+  'WedgePart',
+  'CornerWedgePart',
+  'TrussPart',
+  'Seat',
+  'VehicleSeat',
+  'ModelPart',
+])
+
+function isLuauScriptPath(path?: string): boolean {
+  if (!path) return false
+  const trimmed = path.trim()
+  if (!trimmed) return false
+  if (/\.lua(?:u)?$/i.test(trimmed)) return true
+  return trimmed.startsWith('game.')
+}
+
+function hasLuauSource(props: Record<string, unknown> | undefined): boolean {
+  if (!props) return false
+  const source = (props as any)?.Source
+  return typeof source === 'string' && source.trim().length > 0
+}
+
 function normalizeString(value?: string | null): string | undefined {
   const trimmed = typeof value === 'string' ? value.trim() : undefined
   return trimmed ? trimmed : undefined
 }
 
+function parseLooseEdits(raw: string): Edit[] | undefined {
+  const trimmed = raw.trim()
+  if (!trimmed) return undefined
+  const body = trimmed[0] === '[' && trimmed[trimmed.length - 1] === ']'
+    ? trimmed.slice(1, -1)
+    : trimmed
+  const chunks: string[] = []
+  let depth = 0
+  let current = ''
+  for (let i = 0; i < body.length; i++) {
+    const ch = body[i]
+    if (ch === '{') {
+      if (depth === 0) current = ''
+      depth += 1
+    }
+    if (depth > 0) current += ch
+    if (ch === '}') {
+      depth -= 1
+      if (depth === 0) {
+        chunks.push(current)
+        current = ''
+      }
+    }
+  }
+  if (!chunks.length) return undefined
+  const edits: Edit[] = []
+  for (const chunk of chunks) {
+    const startLine = chunk.match(/"start"\s*:\s*\{[^}]*?"line"\s*:\s*(\d+)/)
+    const startChar = chunk.match(/"start"\s*:\s*\{[^}]*?"character"\s*:\s*(\d+)/)
+    const endLine = chunk.match(/"end"\s*:\s*\{[^}]*?"line"\s*:\s*(\d+)/)
+    const endChar = chunk.match(/"end"\s*:\s*\{[^}]*?"character"\s*:\s*(\d+)/)
+    const textIdx = chunk.indexOf('"text"')
+    if (!startLine || !startChar || !endLine || !endChar || textIdx === -1) return undefined
+    const firstQuote = chunk.indexOf('"', textIdx + 6)
+    if (firstQuote === -1) return undefined
+    const lastQuote = chunk.lastIndexOf('"')
+    if (lastQuote <= firstQuote) return undefined
+    let text = chunk.slice(firstQuote + 1, lastQuote)
+    text = text.replace(/\\"/g, '"')
+    text = text.replace(/\\n/g, '\n').replace(/\\r/g, '\r').replace(/\\t/g, '\t')
+    edits.push({
+      start: { line: Number(startLine[1]) || 0, character: Number(startChar[1]) || 0 },
+      end: { line: Number(endLine[1]) || 0, character: Number(endChar[1]) || 0 },
+      text,
+    })
+  }
+  return edits
+}
+
+function normalizeEditsPayload(raw: unknown): Edit[] | undefined {
+  if (!raw) return undefined
+  if (Array.isArray(raw)) return raw as Edit[]
+  if (typeof raw === 'object') return [raw as Edit]
+  if (typeof raw === 'string') {
+    const cleaned = stripCodeFences(raw)
+    const coerced = coercePrimitive(cleaned)
+    if (Array.isArray(coerced)) return coerced as Edit[]
+    if (coerced && typeof coerced === 'object') return [coerced as Edit]
+    const loose = parseLooseEdits(cleaned)
+    if (loose) return loose
+  }
+  return undefined
+}
+
+function stripCodeFences(text: string): string {
+  let cleaned = text.trim()
+  cleaned = cleaned.replace(/^```(?:json)?/i, '').replace(/```$/i, '').trim()
+  return cleaned
+}
 function determineProvider(opts: { input: ChatInput; modelOverride?: string | null }): ProviderSelection | null {
   const { input, modelOverride } = opts
   const overrideRaw = normalizeString(modelOverride)
@@ -171,105 +286,89 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
   return null
 }
 
-const SYSTEM_PROMPT = `You are Vector, a Roblox Studio copilot.
+const PROMPT_SECTIONS = [
+  `You are Vector, a Roblox Studio copilot.`,
+  `Core rules
+- One tool per turn: emit EXACTLY ONE tool tag and nothing else. Wait for the tool result before continuing.
+- Proposal-first and undoable: never change code/Instances outside a tool; keep each step small and reviewable.
+- Plan when work spans multiple steps. For a single obvious action you may act without <start_plan>.
+- Keep responses tool-only (no prose, markdown, or invented tags).` ,
+  `Default Script Policy
+- Whenever you create, modify, or insert Instances (create_instance/set_properties/rename_instance/delete_instance/insert_asset/generate_asset_3d), you must author Luau that rebuilds the result before completing.
+- Preferred flow: open_or_create_script → show_diff (or apply_edit when already previewed). Scripts must be valid, idempotent, and set Anchored/props explicitly.
+- Skip Luau only when the user explicitly opts out (e.g., "geometry only", "no script", "no code"). Otherwise completion is blocked.`,
+  `Tool calls
+<tool_name>
+  <param>...</param>
+</tool_name>
+- Omit optional params you don’t know.
+- JSON goes inside the tag as strict JSON (double quotes, no trailing commas).
+- For show_diff/apply_edit the <edits> tag MUST contain a JSON array of edit objects (example: [{"start":{...},"end":{...},"text":"..."}]); never pass a plain string.
+- For show_diff/apply_edit when using <files>, every files[i].edits must also be that same JSON array (no strings, no code fences).`,
+  `Encoding & hygiene
+- Strings/numbers are literal. JSON must not be wrapped in quotes or code fences.
+- Paths use GetFullName() with brackets for special characters.
+- Attributes use "@Name" keys.
+- Edits are 0-based, non-overlapping, ≤20 edits and ≤2000 inserted chars.`,
+  `Assets & 3D
+  - search_assets limit ≤ 6 unless the user asks. Include helpful tags.
+  - insert_asset defaults parentPath to game.Workspace if unknown.
+  - If catalog search fails or is disabled, build manually with create_instance/set_properties or Luau. Never complete without placing the objects requested.`,
+  `Scene building
+  - When the user asks to build or decorate the scene, keep placing anchored Parts/Models with create_instance and set_properties until the structures are visible.
+  - Avoid returning empty Models; specify Size/CFrame so geometry appears exactly where the user expects.
+  - Reserve scripting-only flows for users who explicitly request code. Otherwise prefer direct instance manipulation.`,
+  `Quality checks
+- Derive a short checklist from the user prompt and track progress (optionally via <message phase="update">).
+- Do not call <complete> until every checklist item exists and the matching Luau is written (unless the user opted out).
+- Created Models must contain anchored, visible parts or code that produces them.`,
+  `Validation & recovery
+- On VALIDATION_ERROR, retry the SAME tool once with corrected args (no commentary or tool switching).
+- If you would otherwise reply with no tool, either choose exactly one tool or finish with <complete>.`,
+  String.raw`Quick examples
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace</parentPath>
+  <props>{"Name":"Pad","Anchored":true,"Size":{"__t":"Vector3","x":6,"y":1,"z":6},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
 
-Core rules
-- One tool per turn: emit EXACTLY ONE tool tag and NOTHING ELSE. Wait for the tool result before the next step.
-- Proposal-first and undoable: never change code/Instances directly; always propose a small, safe step the plugin can preview/apply.
-- No prose, no markdown, no code fences, no extra tags. Do NOT invent fictitious tags like <plan> or <thoughts>.
+<show_diff>
+  <path>game.ServerScriptService.Builder</path>
+  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"local Builder = {}\nfunction Builder:apply(root)\n  local pad = Instance.new(\"Part\", root)\n  pad.Name = \"Pad\"\n  pad.Anchored = true\n  pad.Size = Vector3.new(6, 1, 6)\n  pad.CFrame = CFrame.new(0, 0.5, 0)\nend\nreturn Builder\n"}]</show_diff>
 
-Tool call format (XML-like)
-<tool_name>\n  <param1>...</param1>\n  <param2>...</param2>\n</tool_name>
+<create_instance>
+  <className>Model</className>
+  <parentPath>game.Workspace</parentPath>
+  <props>{"Name":"House"}</props>
+</create_instance>
 
-Encoding for parameters
-- Strings/numbers: write the literal value.
-- Objects/arrays: INNER TEXT MUST be strict JSON (double quotes; no trailing commas). Never wrap JSON in quotes. Never add code fences.
-  ✅ <props>{"Name":"Grid","Anchored":true}</props>
-  ❌ <props>"{ \"Name\": \"Grid\" }"</props>
-  ❌ <props>\`\`\`json{ \"Name\": \"Grid\" }\`\`\`</props>
-  ❌ <props>{ Name: "Grid", }</props>
-- If a parameter is optional and unknown, omit the tag entirely (do NOT write "null" or "undefined").
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.House</parentPath>
+  <props>{"Name":"Floor","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
 
-Available tools
-- Context (read-only): get_active_script(), list_selection(), list_open_documents(maxCount?), list_code_definition_names(root?,limit?,exts?), search_files(query,root?,limit?,exts?,caseSensitive?).
-- Actions: show_diff(path,edits[]), apply_edit(path,edits[]), create_instance(className,parentPath,props?), set_properties(path,props), rename_instance(path,newName), delete_instance(path), search_assets(query,tags?,limit?), insert_asset(assetId,parentPath?), generate_asset_3d(prompt,tags?,style?,budget?).
-- Completion: complete(summary,confidence?) or attempt_completion(result,confidence?) — must be called when the task is finished to present the result.
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.House</parentPath>
+  <props>{"Name":"WallFront","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":8,"z":1},"CFrame":{"__t":"CFrame","comps":[0,4.5,-7.5, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>`
+]
 
-Paths & names
-- Use canonical GetFullName() paths, e.g., game.Workspace.Model.Part.
-- Avoid creating names with dots or slashes; prefer alphanumerics + underscores (e.g., Cell_1_1).
-- If an existing path contains special characters, bracket segments: game.Workspace["My.Part"]["Wall [A]"]
+const SYSTEM_PROMPT = PROMPT_SECTIONS.join('\n\n')
+  + '\n'
+  + PLANNER_GUIDE
+  + '\n'
+  + COMPLEXITY_DECISION_GUIDE
+  + '\n'
+  + TOOL_REFERENCE
+  + '\n'
+  + QUALITY_CHECK_GUIDE
+  + '\n'
+  + EXAMPLE_FARM_SCRIPT
+  + '\n'
++ ROLE_SCOPE_GUIDE
 
-Roblox typed values (for props)
-- Scalars/booleans/strings: raw JSON.
-- Wrappers with "__t": Vector3 {"__t":"Vector3","x":0,"y":1,"z":0}; Vector2 {"__t":"Vector2","x":0,"y":0};
-  Color3 {"__t":"Color3","r":1,"g":0.5,"b":0.25}; UDim {"__t":"UDim","scale":0,"offset":16};
-  UDim2 {"__t":"UDim2","x":{"scale":0,"offset":0},"y":{"scale":0,"offset":0}};
-  CFrame {"__t":"CFrame","comps":[x,y,z, r00,r01,r02, r10,r11,r12, r20,r21,r22]};
-  EnumItem {"__t":"EnumItem","enum":"Enum.Material","name":"Plastic"};
-  BrickColor {"__t":"BrickColor","name":"Bright red"};
-  Instance ref {"__t":"Instance","path":"game.ReplicatedStorage.Folder.Template"}.
-- Attributes: prefix keys with @, e.g., {"@Health":100}.
-
-Editing rules
-- 0-based coordinates; end is exclusive. Prefer the smallest edit set; avoid whole-file rewrites.
-- Prefer show_diff first; use apply_edit only after approval. Never include __finalText.
-
-Context & defaults
-- If you need path/selection and it wasn't provided, call get_active_script / list_selection first.
-- If parentPath is unknown for create_instance/insert_asset, use game.Workspace.
-- Only set real properties for the target class; do not create instances via set_properties.
-
-Mentions
-- Users may attach context via '@file path/to/file', '@folder path/to/folder', '@url https://…', or '@problems' to load diagnostic logs. These appear in the conversation history—use them before requesting additional context.
-
-Modes
-- Ask: do exactly one atomic change.
-- Agent: fetch minimal context if needed, then act with one tool.
-- Auto: assume approved small steps; avoid destructive ops; skip actions that require human choice.
-
-Assets & 3D
- - search_assets: keep limit ≤ 6 unless the user asks; include tags when helpful.
- - insert_asset: assetId must be a number; default parentPath to game.Workspace if unknown.
- - generate_asset_3d: returns a jobId only; prefer insert_asset when inserting existing assets.
-- If search_assets returns no results or metadata reports a stub/fallback, stop retrying catalog lookups.
-- Switch to manual creation: use create_instance for simple primitives or author Luau via show_diff/apply_edit so the scene still progresses.
-- When the user explicitly asks to add/insert/create something and the catalog path fails, you MUST produce the object manually (create_instance or Luau edits) instead of completing.
-
-Validation & recovery
-- On VALIDATION_ERROR, resubmit the SAME tool once with corrected args; no commentary and no tool switching.
-- If you return with no tool call, you MUST either choose exactly one tool or call complete(summary) to finish.
-
-Selection defaults
-- If EXACTLY ONE instance is selected and it is a reasonable container, prefer it by default:
-  - Use that selection as <parentPath> for create_instance/insert_asset when unspecified.
-  - Use that selection's path for rename_instance/set_properties/delete_instance when <path> is missing.
-  - If no single valid selection, default to game.Workspace or fetch context as needed.
-
-Properties vs Attributes
-- Only set real class properties in <props>. If a key is not a property of the target class, write it as an Attribute by prefixing with "@".
-- Do NOT rename via set_properties. Use <rename_instance> instead.
-
-Edit constraints
-- Edits must be sorted by start position and be NON-OVERLAPPING.
-- Keep small: ≤ 20 edits AND ≤ 2000 inserted characters total.
-- Never send an empty edits array.
-
-Safety for instance ops
-- Never delete DataModel or Services. Operate under Workspace unless the user targets another service explicitly.
-- Use only valid Roblox class names for <className>. If unsure, prefer "Part" or "Model".
-
-Path & JSON hygiene
-- No leading/trailing whitespace or code fences inside parameter bodies.
-- Do not include blank lines before/after the outer tool tag.
-- When a segment contains dots/brackets, use bracket notation exactly: game.Workspace["My.Part"]["Wall [A]"]
-
-Examples (correct)
-<create_instance>\n  <className>Part</className>\n  <parentPath>game.Workspace</parentPath>\n  <props>{"Name":"Cell_1_1","Anchored":true,"Size":{"__t":"Vector3","x":4,"y":1,"z":4},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>\n</create_instance>
-
-<set_properties>\n  <path>game.Workspace.Cell_1_1</path>\n  <props>{"Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Plastic"},"@Health":100}</props>\n</set_properties>
-
-<show_diff>\n  <path>game.Workspace.Script</path>\n  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"-- Header\\n"}]</edits>\n</show_diff>`
 
 function tryParseJSON<T = any>(s: unknown): T | undefined {
   if (typeof s !== 'string') return undefined
@@ -285,6 +384,40 @@ function tryParseStrictJSON(s: string): any {
   try { return JSON.parse(s) } catch { return undefined }
 }
 
+function escapeBareNewlinesInJson(value: string): string {
+  let result = ''
+  let inString = false
+  let escaped = false
+  for (let i = 0; i < value.length; i++) {
+    const ch = value[i]
+    if (ch === '"' && !escaped) {
+      inString = !inString
+      result += ch
+      continue
+    }
+    if ((ch === '\n' || ch === '\r') && inString) {
+      if (ch === '\r' && value[i + 1] === '\n') {
+        result += '\\r\\n'
+        i += 1
+      } else if (ch === '\r') {
+        result += '\\r'
+      } else {
+        result += '\\n'
+      }
+      escaped = false
+      continue
+    }
+    if (ch === '\\') {
+      escaped = !escaped
+      result += ch
+      continue
+    }
+    escaped = false
+    result += ch
+  }
+  return result
+}
+
 function coercePrimitive(v: string): any {
   const t = v.trim()
   if (t === 'true') return true
@@ -294,6 +427,11 @@ function coercePrimitive(v: string): any {
   // Try strict JSON first
   const jStrict = tryParseStrictJSON(t)
   if (jStrict !== undefined) return jStrict
+  const newlineSanitized = escapeBareNewlinesInJson(t)
+  if (newlineSanitized !== t) {
+    const parsed = tryParseStrictJSON(newlineSanitized)
+    if (parsed !== undefined) return parsed
+  }
   // JSON5-like fallback for common LLM outputs: single quotes, unquoted keys, trailing commas, fenced code
   if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
     let s = t
@@ -335,7 +473,17 @@ function parseToolXML(text: string): { name: string; args: Record<string, any> }
 }
 
 function toEditArray(editsRaw: any): Edit[] | null {
-  const parsed = Array.isArray(editsRaw) ? editsRaw : tryParseJSON(editsRaw)
+  let parsed: any
+  if (Array.isArray(editsRaw)) {
+    parsed = editsRaw
+  } else if (typeof editsRaw === 'string') {
+    const cleaned = stripCodeFences(editsRaw)
+    parsed = tryParseJSON(cleaned)
+    if (!parsed) parsed = coercePrimitive(cleaned)
+    if (!parsed) parsed = parseLooseEdits(cleaned)
+  } else {
+    parsed = tryParseJSON(editsRaw)
+  }
   if (!parsed || !Array.isArray(parsed) || parsed.length === 0) return null
   const out: Edit[] = []
   for (const e of parsed) {
@@ -370,15 +518,48 @@ function toEditArray(editsRaw: any): Edit[] | null {
   return out
 }
 
-type MapResult = { proposals: Proposal[]; missingContext?: string }
+type MapToolExtras = {
+  getScriptSource?: (path: string) => string | undefined
+  recordScriptSource?: (path: string, text: string) => void
+  recordPlanStart?: (steps: string[]) => void
+  recordPlanUpdate?: (update: { completedStep?: string; nextStep?: string; notes?: string }) => void
+  userOptedOut?: boolean
+  geometryTracker?: { sawCreate: boolean; sawParts: boolean }
+}
 
-function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInput, msg: string): MapResult {
+type MapResult = { proposals: Proposal[]; missingContext?: string; contextResult?: any }
+
+function mapToolToProposals(
+  name: string,
+  a: Record<string, any>,
+  input: ChatInput,
+  msg: string,
+  extras?: MapToolExtras,
+): MapResult {
   const proposals: Proposal[] = []
   const ensurePath = (fallback?: string | null): string | undefined => {
     const p = typeof a.path === 'string' ? a.path : undefined
     return p || (fallback || undefined)
   }
+  if (name === 'start_plan') {
+    const steps = Array.isArray((a as any).steps) ? (a as any).steps.map(String) : []
+    if (!steps.length) {
+      return { proposals, missingContext: 'Provide at least one plan step.' }
+    }
+    extras?.recordPlanStart?.(steps)
+    return { proposals, contextResult: { steps } }
+  }
+  if (name === 'update_plan') {
+    const completedStep = typeof (a as any).completedStep === 'string' ? (a as any).completedStep : undefined
+    const nextStep = typeof (a as any).nextStep === 'string' ? (a as any).nextStep : undefined
+    const notes = typeof (a as any).notes === 'string' ? (a as any).notes : undefined
+    extras?.recordPlanUpdate?.({ completedStep, nextStep, notes })
+    return { proposals, contextResult: { completedStep, nextStep, notes } }
+  }
   if (name === 'show_diff' || name === 'apply_edit') {
+    if (extras?.userOptedOut) {
+      return { proposals, missingContext: 'Scripting is disabled for this request; use object tools instead.' }
+    }
     if (Array.isArray((a as any).files) && (a as any).files.length > 0) {
       const fileChanges: EditFileChange[] = []
       for (const entry of (a as any).files as any[]) {
@@ -392,6 +573,9 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
             : undefined
         if (typeof baseText !== 'string') continue
         const proposed = applyRangeEdits(baseText, edits)
+        if (isLuauScriptPath(entry.path) && typeof proposed === 'string') {
+          extras?.recordScriptSource?.(entry.path, proposed)
+        }
         const unified = simpleUnifiedDiff(baseText, proposed, entry.path)
         const beforeHash = crypto.createHash('sha1').update(baseText).digest('hex')
         fileChanges.push({
@@ -422,6 +606,9 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
     if (path && edits) {
       const old = input.context.activeScript?.text || ''
       const next = applyRangeEdits(old, edits)
+      if (isLuauScriptPath(path) && typeof next === 'string') {
+        extras?.recordScriptSource?.(path, next)
+      }
       const unified = simpleUnifiedDiff(old, next, path)
       const beforeHash = crypto.createHash('sha1').update(old).digest('hex')
       const fileChange: EditFileChange = {
@@ -450,6 +637,17 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
     if (typeof (a as any).className === 'string' && parentPath) {
       const op: ObjectOp = { op: 'create_instance', className: (a as any).className, parentPath, props: (a as any).props }
       proposals.push({ id: id('obj'), type: 'object_op', ops: [op], notes: 'Parsed from create_instance' })
+      if (extras?.geometryTracker) {
+        extras.geometryTracker.sawCreate = true
+        extras.geometryTracker.sawParts ||= PART_CLASS_NAMES.has(op.className)
+      }
+      if (SCRIPT_CLASS_NAMES.has(op.className) && hasLuauSource(op.props as Record<string, unknown>)) {
+        const props = (op.props || {}) as Record<string, unknown>
+        const nameProp = typeof props['Name'] === 'string' ? String(props['Name']) : 'Script'
+        const sourceText = String(props['Source'] as string)
+        const targetPath = buildInstancePath(parentPath, nameProp)
+        extras?.recordScriptSource?.(targetPath, sourceText)
+      }
       return { proposals }
     }
     if (!parentPath) return { proposals, missingContext: 'Need parent selection to create instance.' }
@@ -458,6 +656,14 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
     if (typeof (a as any).path === 'string' && (a as any).props && typeof (a as any).props === 'object') {
       const op: ObjectOp = { op: 'set_properties', path: (a as any).path, props: (a as any).props }
       proposals.push({ id: id('obj'), type: 'object_op', ops: [op], notes: 'Parsed from set_properties' })
+      if (extras?.geometryTracker) {
+        const props = (a as any).props || {}
+        extras.geometryTracker.sawParts ||= ['Size', 'CFrame', 'Position', 'Anchored', 'Transparency', 'Color', 'Shape', 'Material'].some((key) => Object.prototype.hasOwnProperty.call(props, key))
+      }
+      if (isLuauScriptPath(op.path) && hasLuauSource(op.props as Record<string, unknown>)) {
+        const props = (op.props || {}) as Record<string, unknown>
+        extras?.recordScriptSource?.(op.path, String(props['Source']))
+      }
       return { proposals }
     }
     return { proposals, missingContext: 'Need selected instance to set properties.' }
@@ -492,6 +698,10 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
     const assetId = typeof (a as any).assetId === 'number' ? (a as any).assetId : Number((a as any).assetId)
     if (!isNaN(assetId)) {
       proposals.push({ id: id('asset'), type: 'asset_op', insert: { assetId, parentPath: typeof (a as any).parentPath === 'string' ? (a as any).parentPath : undefined } })
+      if (extras?.geometryTracker) {
+        extras.geometryTracker.sawCreate = true
+        extras.geometryTracker.sawParts = true
+      }
       return { proposals }
     }
     return { proposals, missingContext: 'Need assetId to insert asset.' }
@@ -499,26 +709,222 @@ function mapToolToProposals(name: string, a: Record<string, any>, input: ChatInp
   if (name === 'generate_asset_3d') {
     if (typeof (a as any).prompt === 'string') {
       proposals.push({ id: id('asset'), type: 'asset_op', generate3d: { prompt: (a as any).prompt, tags: Array.isArray((a as any).tags) ? (a as any).tags.map(String) : undefined, style: typeof (a as any).style === 'string' ? (a as any).style : undefined, budget: typeof (a as any).budget === 'number' ? (a as any).budget : undefined } })
+      if (extras?.geometryTracker) {
+        extras.geometryTracker.sawCreate = true
+        extras.geometryTracker.sawParts = true
+      }
       return { proposals }
     }
+  }
+  if (name === 'open_or_create_script') {
+    if (extras?.userOptedOut) {
+      return { proposals, missingContext: 'Scripting is disabled for this request; operate directly on Instances instead.' }
+    }
+    const rawPath = typeof (a as any).path === 'string' ? (a as any).path.trim() : undefined
+    const rawParent = typeof (a as any).parentPath === 'string' ? (a as any).parentPath.trim() : undefined
+    const rawName = typeof (a as any).name === 'string' ? (a as any).name.trim() : undefined
+
+    let targetPath = rawPath && rawPath.length ? rawPath : undefined
+    let parentPath = rawParent && rawParent.length ? rawParent : undefined
+    let scriptName = rawName && rawName.length ? rawName : undefined
+
+    if (!targetPath) {
+      if (!parentPath || !scriptName) {
+        return { proposals, missingContext: 'Need script path or (parentPath + name).' }
+      }
+      targetPath = buildInstancePath(parentPath, scriptName)
+    } else {
+      const split = splitInstancePath(targetPath)
+      if (split) {
+        parentPath = parentPath || split.parentPath
+        scriptName = scriptName || split.name
+      }
+    }
+
+    if (!parentPath) {
+      return { proposals, missingContext: 'Unable to determine parent path for script.' }
+    }
+    if (!scriptName) {
+      scriptName = 'Script'
+      targetPath = buildInstancePath(parentPath, scriptName)
+    }
+
+    const knownSource = targetPath ? extras?.getScriptSource?.(targetPath) : undefined
+    let created = false
+    let text = typeof knownSource === 'string' ? knownSource : ''
+
+    if (targetPath && typeof knownSource !== 'string') {
+      created = true
+      text = ''
+      const op: ObjectOp = {
+        op: 'create_instance',
+        className: 'Script',
+        parentPath,
+        props: { Name: scriptName, Source: text },
+      }
+      proposals.push({
+        id: id('obj'),
+        type: 'object_op',
+        notes: 'Ensure script exists before editing.',
+        ops: [op],
+      })
+      extras?.recordScriptSource?.(targetPath, text)
+    }
+
+    return { proposals, contextResult: { path: targetPath, text, created } }
   }
   if (name === 'complete') {
     const summary = typeof (a as any).summary === 'string' ? (a as any).summary : undefined
     const confidence = typeof (a as any).confidence === 'number' ? (a as any).confidence : undefined
+    if (extras?.userOptedOut && extras.geometryTracker) {
+      if (!extras.geometryTracker.sawCreate || !extras.geometryTracker.sawParts) {
+        return { proposals, missingContext: 'Need to place visible parts in the scene before completing.' }
+      }
+    }
     if (summary && summary.trim().length > 0) {
       proposals.push({ id: id('done'), type: 'completion', summary, confidence })
+      return { proposals }
+    }
+  }
+  if (name === 'final_message') {
+    const text = typeof (a as any).text === 'string' ? (a as any).text : undefined
+    const confidence = typeof (a as any).confidence === 'number' ? (a as any).confidence : undefined
+    if (extras?.userOptedOut && extras.geometryTracker) {
+      if (!extras.geometryTracker.sawCreate || !extras.geometryTracker.sawParts) {
+        return { proposals, missingContext: 'Need to place visible parts in the scene before completing.' }
+      }
+    }
+    if (text && text.trim().length > 0) {
+      proposals.push({ id: id('done'), type: 'completion', summary: text, confidence })
+      return { proposals }
+    }
+  }
+  if (name === 'message') {
+    const text = typeof (a as any).text === 'string' ? (a as any).text : undefined
+    const phase = typeof (a as any).phase === 'string' ? (a as any).phase : 'update'
+    if (extras?.userOptedOut && extras.geometryTracker && phase.toLowerCase() === 'final') {
+      if (!extras.geometryTracker.sawCreate || !extras.geometryTracker.sawParts) {
+        return { proposals, missingContext: 'Need to place visible parts in the scene before completing.' }
+      }
+    }
+    if (text && text.trim().length > 0) {
+      // For 'final' we also return a completion so it shows in proposals
+      if (phase === 'final') {
+        proposals.push({ id: id('done'), type: 'completion', summary: text })
+      }
       return { proposals }
     }
   }
   if (name === 'attempt_completion') {
     const result = typeof (a as any).result === 'string' ? (a as any).result : undefined
     const confidence = typeof (a as any).confidence === 'number' ? (a as any).confidence : undefined
+    if (extras?.userOptedOut && extras.geometryTracker) {
+      if (!extras.geometryTracker.sawCreate || !extras.geometryTracker.sawParts) {
+        return { proposals, missingContext: 'Need to place visible parts in the scene before completing.' }
+      }
+    }
     if (result && result.trim().length > 0) {
       proposals.push({ id: id('done'), type: 'completion', summary: result, confidence })
       return { proposals }
     }
   }
   return { proposals }
+}
+
+function proposalTouchesLuau(proposal: Proposal): boolean {
+  if (!proposal) return false
+  if (proposal.type === 'edit') {
+    const files = proposal.files || []
+    return files.some((file) => isLuauScriptPath(file?.path))
+  }
+  if (proposal.type === 'object_op') {
+    return proposal.ops.some((op) => {
+      if (op.op === 'create_instance' && SCRIPT_CLASS_NAMES.has(op.className)) {
+        return hasLuauSource(op.props as Record<string, unknown> | undefined)
+      }
+      if (op.op === 'set_properties') {
+        if (!hasLuauSource(op.props as Record<string, unknown> | undefined)) return false
+        return isLuauScriptPath(op.path)
+      }
+      return false
+    })
+  }
+  return false
+}
+
+const SCRIPT_OPT_OUT_PATTERNS = [
+  /\bno\s+(?:script|scripts|code)\b/i,
+  /\bwithout\s+(?:any\s+)?(?:script|scripts|code)\b/i,
+  /\bno\s+scripting\b/i,
+  /\bgeometry\s+only\b/i,
+  /\bjust\s+(?:place|build)\s+parts\b/i,
+  /\bno\s+lua\b/i,
+]
+
+const SCRIPT_OPT_IN_PATTERNS = [
+  /\binclude\s+(?:the\s+)?(?:script|code)\b/i,
+  /\bwith\s+(?:a\s+)?script\b/i,
+  /\badd\s+(?:the\s+)?script\b/i,
+  /\bwrite\s+(?:the\s+)?code\b/i,
+  /\bprovide\s+(?:the\s+)?script\b/i,
+]
+
+const GEOMETRY_INTENT_PATTERNS = [
+  /\b(build|create|make|spawn|place|add|put|drop)\b[^.!?]{0,120}\b(house|building|structure|scene|environment|world|level|map|terrain|tower|bridge|park|city|village|room|base|farm|garden|landscape)\b/i,
+  /\bpopulate\b[^.!?]{0,120}\b(scene|world|environment)\b/i,
+  /\bdecorate\b[^.!?]{0,120}\b(scene|area|room)\b/i,
+]
+
+function detectScriptOptPreference(text: string): boolean | null {
+  if (!text) return null
+  if (SCRIPT_OPT_OUT_PATTERNS.some((pat) => pat.test(text))) return true
+  if (SCRIPT_OPT_IN_PATTERNS.some((pat) => pat.test(text))) return false
+  if (GEOMETRY_INTENT_PATTERNS.some((pat) => pat.test(text))) return true
+  return null
+}
+
+function ensureScriptPolicy(state: TaskState): ScriptPolicyState {
+  if (!state.policy || typeof state.policy !== 'object') {
+    state.policy = { geometryOps: 0, luauEdits: 0 }
+    return state.policy
+  }
+  if (typeof state.policy.geometryOps !== 'number' || Number.isNaN(state.policy.geometryOps)) {
+    state.policy.geometryOps = 0
+  }
+  if (typeof state.policy.luauEdits !== 'number' || Number.isNaN(state.policy.luauEdits)) {
+    state.policy.luauEdits = 0
+  }
+  return state.policy
+}
+
+function proposalTouchesGeometry(proposal: Proposal): boolean {
+  if (!proposal) return false
+  if (proposal.type === 'object_op') {
+    return proposal.ops.some((op) => {
+      if (op.op === 'create_instance') {
+        if (SCRIPT_CLASS_NAMES.has(op.className)) {
+          return !hasLuauSource(op.props as Record<string, unknown> | undefined)
+        }
+        return true
+      }
+      if (op.op === 'set_properties') {
+        const isScriptPath = isLuauScriptPath(op.path)
+        const hasSource = hasLuauSource(op.props as Record<string, unknown> | undefined)
+        if (isScriptPath && hasSource) return false
+        return true
+      }
+      if (op.op === 'rename_instance' || op.op === 'delete_instance') {
+        return !isLuauScriptPath(op.path)
+      }
+      return false
+    })
+  }
+  if (proposal.type === 'asset_op') {
+    if (proposal.insert) return true
+    if (proposal.generate3d) return true
+    return false
+  }
+  return false
 }
 
 export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[]; taskState: TaskState }> {
@@ -532,8 +938,13 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
   const taskId = (input as any).workflowId || input.projectId
   let taskState = loadTaskState(taskId)
+  ensureScriptPolicy(taskState)
   const updateState = (fn: (state: TaskState) => void) => {
-    taskState = updateTaskState(taskId, fn)
+    taskState = updateTaskState(taskId, (state) => {
+      ensureScriptPolicy(state)
+      fn(state)
+      ensureScriptPolicy(state)
+    })
     return taskState
   }
   const appendHistory = (role: 'user' | 'assistant' | 'system', content: string) => {
@@ -553,10 +964,99 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     })
   }
 
+  const definitionsEqual = (a?: DefinitionInfo[] | null, b?: DefinitionInfo[] | null): boolean => {
+    const listA = Array.isArray(a) ? a : []
+    const listB = Array.isArray(b) ? b : []
+    if (listA.length !== listB.length) return false
+    for (let i = 0; i < listA.length; i++) {
+      const da = listA[i]
+      const db = listB[i]
+      if (!db) return false
+      if (da.file !== db.file || da.line !== db.line || da.name !== db.name) return false
+    }
+    return true
+  }
+
+  const initialDefinitions = setCodeDefinitionCache(taskId, taskState.codeDefinitions)
+  if (!definitionsEqual(taskState.codeDefinitions, initialDefinitions)) {
+    updateState((state) => {
+      state.codeDefinitions = initialDefinitions
+    })
+  } else {
+    taskState.codeDefinitions = initialDefinitions
+  }
+
+  const scriptSources: Record<string, string> = { ...(taskState.scriptSources || {}) }
+  const normalizeScriptPath = (path?: string) => (path || '').trim()
+  const getScriptSource = (path: string): string | undefined => {
+    const key = normalizeScriptPath(path)
+    if (!key) return undefined
+    return scriptSources[key]
+  }
+  const recordScriptSource = (path?: string, text?: string) => {
+    const key = normalizeScriptPath(path)
+    if (!key || typeof text !== 'string') return
+    if (scriptSources[key] === text) return
+    scriptSources[key] = text
+    updateState((state) => {
+      const next = { ...(state.scriptSources || {}) }
+      next[key] = text
+      state.scriptSources = next
+    })
+  }
+
+  const recordPlanStart = (steps: string[]) => {
+    const normalized = steps.map((s) => (typeof s === 'string' ? s.trim() : '')).filter((s) => s.length > 0)
+    updateState((state) => {
+      state.plan = { steps: normalized, completed: [], currentIndex: 0 }
+    })
+    pushChunk(streamKey, 'plan.start ' + JSON.stringify(normalized))
+  }
+
+  const recordPlanUpdate = (update: { completedStep?: string; nextStep?: string; notes?: string }) => {
+    updateState((state) => {
+      if (!state.plan) {
+        state.plan = { steps: [], completed: [], currentIndex: 0 }
+      }
+      const plan = state.plan!
+      if (update.completedStep) {
+        const idx = plan.steps.findIndex((step) => step === update.completedStep)
+        if (idx >= 0 && !plan.completed.includes(update.completedStep)) {
+          plan.completed.push(update.completedStep)
+          plan.currentIndex = Math.min(idx + 1, plan.steps.length - 1)
+        }
+      }
+      if (update.nextStep) {
+        const idx = plan.steps.findIndex((step) => step === update.nextStep)
+        if (idx >= 0) {
+          plan.currentIndex = idx
+        }
+      }
+      if (typeof update.notes === 'string' && update.notes.trim().length > 0) {
+        plan.notes = update.notes.trim()
+      }
+    })
+    pushChunk(streamKey, 'plan.update ' + JSON.stringify(update))
+  }
+
+  let userOptedOut = !!taskState.policy?.userOptedOut
+  let scriptWorkObserved = (taskState.policy?.luauEdits || 0) > 0
+  let geometryWorkObserved = (taskState.policy?.geometryOps || 0) > 0
+
   appendHistory('user', msg)
   attachments.forEach((att) => {
     appendHistory('system', `[attachment:${att.type}] ${att.label}\n${att.content}`)
   })
+  const scriptPreference = detectScriptOptPreference(msg)
+  if (scriptPreference !== null) {
+    userOptedOut = scriptPreference
+    updateState((state) => {
+      const policy = ensureScriptPolicy(state)
+      policy.userOptedOut = scriptPreference
+      policy.lastOptOutAt = Date.now()
+    })
+  }
+  const geometryTracker = userOptedOut ? { sawCreate: false, sawParts: false } : undefined
   updateState((state) => {
     state.autoApproval.enabled = autoEnabled
     state.autoApproval.readFiles = autoEnabled
@@ -564,6 +1064,27 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     state.autoApproval.execSafe = autoEnabled
     if (typeof state.counters.contextRequests !== 'number') state.counters.contextRequests = 0
   })
+
+  if (input.context.scene && Array.isArray(input.context.scene.nodes)) {
+    updateState((state) => {
+      hydrateSceneSnapshot(state, input.context.scene)
+    })
+  }
+
+  const contextHasDefinitions = Object.prototype.hasOwnProperty.call(input.context as any, 'codeDefinitions')
+  if (contextHasDefinitions) {
+    const defsRaw = Array.isArray((input.context as any).codeDefinitions)
+      ? ((input.context as any).codeDefinitions as DefinitionInfo[])
+      : []
+    const sanitizedDefs = setCodeDefinitionCache(taskId, defsRaw)
+    if (!definitionsEqual(taskState.codeDefinitions, sanitizedDefs)) {
+      updateState((state) => {
+        state.codeDefinitions = sanitizedDefs
+      })
+    } else {
+      taskState.codeDefinitions = sanitizedDefs
+    }
+  }
 
   const attachmentSummary = attachments.length
     ? attachments
@@ -595,7 +1116,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
   let messages: { role: 'user' | 'assistant'; content: string }[] | null = null
   let assetFallbackWarningSent = false
-  const catalogSearchAvailable = !!process.env.CATALOG_API_URL
+  const catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
+  let scriptWarnings = 0
 
   const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState } => {
     const annotated = annotateAutoApproval(list, { autoEnabled })
@@ -614,54 +1136,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   // Deterministic templates for milestone verification
-  const lower = msg.toLowerCase()
   const proposals: Proposal[] = []
-  const addObj = (ops: ObjectOp[], notes?: string) => proposals.push({ id: id('obj'), type: 'object_op', ops, notes })
-  const makePartProps = (name: string, x: number, y: number, z: number) => ({
-    Name: name,
-    Anchored: true,
-    Size: { x: 4, y: 1, z: 4 },
-    CFrame: { x, y, z },
-  })
-  if (/\b(grid\s*3\s*x\s*3|3\s*x\s*3\s*grid)\b/.test(lower)) {
-    const parent = 'game.Workspace'
-    addObj([{ op: 'create_instance', className: 'Model', parentPath: parent, props: { Name: 'Grid' } }], 'Create Grid model')
-    const basePath = 'game.Workspace.Grid'
-    const coords = [-4, 0, 4]
-    for (let i = 0; i < 3; i++) {
-      for (let j = 0; j < 3; j++) {
-        const name = `Cell_${i + 1}_${j + 1}`
-        const x = coords[j]
-        const z = coords[i]
-        addObj([
-          { op: 'create_instance', className: 'Part', parentPath: basePath, props: makePartProps(name, x, 0.5, z) },
-        ], `Create ${name}`)
-      }
-    }
-    appendHistory('assistant', 'template: 3x3 grid')
-    return finalize(proposals)
-  }
-  if (/\bfarming\b/.test(lower)) {
-    const parent = 'game.Workspace'
-    addObj([{ op: 'create_instance', className: 'Model', parentPath: parent, props: { Name: 'Farm' } }], 'Create Farm model')
-    const basePath = 'game.Workspace.Farm'
-    addObj([{ op: 'create_instance', className: 'Part', parentPath: basePath, props: { Name: 'FarmBase', Anchored: true, Size: { x: 40, y: 1, z: 40 }, CFrame: { x: 0, y: 0.5, z: 0 } } }], 'Create Farm base')
-    const coords = [-12, -4, 4, 12]
-    let count = 0
-    for (let i = 0; i < 4; i++) {
-      for (let j = 0; j < 4; j++) {
-        if (count >= 14) break
-        const name = `Soil_${i + 1}_${j + 1}`
-        const x = coords[j]
-        const z = coords[i]
-        addObj([{ op: 'create_instance', className: 'Part', parentPath: basePath, props: makePartProps(name, x, 0.5, z) }], `Create ${name}`)
-        count++
-      }
-      if (count >= 14) break
-    }
-    appendHistory('assistant', 'template: farming kit')
-    return finalize(proposals)
-  }
 
   const toXml = (name: string, args: Record<string, any>): string => {
     const parts: string[] = [`<${name}>`]
@@ -680,11 +1155,12 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
   while (useProvider && providerSelection && activeProvider) {
     const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
+    const defaultAskTurns = Number(process.env.VECTOR_ASK_TURNS || 3)
     const maxTurns = Number(
       typeof input.maxTurns === 'number'
         ? input.maxTurns
         : input.mode === 'ask'
-          ? 1
+          ? defaultAskTurns
           : defaultMaxTurns,
     )
     if (!messages) {
@@ -709,6 +1185,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       return true
     }
 
+    let assistantFinalEmitted = false
     for (let turn = 0; turn < maxTurns; turn++) {
       const runId = id('run')
       const startedAt = Date.now()
@@ -744,6 +1221,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         content = resp.content || ''
         pushChunk(streamKey, `provider.response provider=${activeProvider} turn=${turn} chars=${content.length}`)
         console.log(`[orch] provider.ok provider=${activeProvider} turn=${turn} contentLen=${content.length}`)
+        console.log('[orch] provider.raw', content)
         updateState((state) => {
           const run = state.runs.find((r) => r.id === runId)
           if (run) {
@@ -791,9 +1269,56 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       pushChunk(streamKey, `tool.parsed ${String(name)}`)
       console.log(`[orch] tool.parsed name=${String(name)}`)
 
-      if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
-        a = { ...a, path: input.context.activeScript.path }
+      const planReady = Array.isArray(taskState.plan?.steps) && (taskState.plan?.steps.length || 0) > 0
+      const askMode = (input.mode || 'agent') === 'ask'
+      const requirePlan = (process.env.VECTOR_REQUIRE_PLAN || '0') === '1'
+      const toolName = String(name)
+      const isContextOrNonActionTool = (
+        toolName === 'start_plan' ||
+        toolName === 'update_plan' ||
+        toolName === 'message' ||
+        toolName === 'final_message' ||
+        toolName === 'complete' ||
+        toolName === 'attempt_completion' ||
+        toolName === 'get_active_script' ||
+        toolName === 'list_selection' ||
+        toolName === 'list_open_documents' ||
+        toolName === 'open_or_create_script' ||
+        toolName === 'list_children' ||
+        toolName === 'get_properties' ||
+        toolName === 'list_code_definition_names' ||
+        toolName === 'search_files'
+      )
+      const isActionTool = !isContextOrNonActionTool
+      if (!planReady && isActionTool && !askMode && requirePlan) {
+        const errMsg = 'PLAN_REQUIRED Call <start_plan> with a step-by-step outline before taking actions.'
+        pushChunk(streamKey, `error.validation ${String(name)} plan_required`)
+        console.warn(`[orch] plan.required tool=${String(name)}`)
+        convo.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'user', content: errMsg })
+        appendHistory('system', errMsg)
+        continue
       }
+
+  if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
+    a = { ...a, path: input.context.activeScript.path }
+  }
+  if (name === 'show_diff' || name === 'apply_edit') {
+    const filesRaw = Array.isArray((a as any).files) ? (a as any).files : undefined
+    if (filesRaw) {
+      const files = filesRaw.map((entry: any) => {
+        if (!entry || typeof entry !== 'object') return entry
+        const edits = normalizeEditsPayload((entry as any).edits)
+        return edits ? { ...entry, edits } : entry
+      })
+      a = { ...a, files }
+    }
+
+    const normalizedEdits = normalizeEditsPayload((a as any).edits)
+    if (normalizedEdits) {
+      a = { ...a, edits: normalizedEdits }
+    }
+  }
       if ((name === 'rename_instance' || name === 'set_properties' || name === 'delete_instance') && !a.path && selPath) {
         a = { ...a, path: selPath }
       }
@@ -843,28 +1368,68 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         name === 'get_active_script' ||
         name === 'list_selection' ||
         name === 'list_open_documents' ||
+        name === 'list_children' ||
+        name === 'get_properties' ||
         name === 'list_code_definition_names' ||
         name === 'search_files'
       if (isContextTool) {
-        const result = name === 'get_active_script'
-          ? (input.context.activeScript || null)
-          : name === 'list_selection'
-            ? (input.context.selection || [])
-            : name === 'list_open_documents'
-              ? (input.context.openDocs || [])
-              : name === 'list_code_definition_names'
-                ? listCodeDefinitionNames({
-                    root: typeof (a as any).root === 'string' ? (a as any).root : undefined,
-                    limit: typeof (a as any).limit === 'number' ? (a as any).limit : undefined,
-                    exts: Array.isArray((a as any).exts) ? (a as any).exts.map(String) : undefined,
-                  })
-                : searchFiles({
-                    query: String((a as any).query ?? ''),
-                    root: typeof (a as any).root === 'string' ? (a as any).root : undefined,
-                    limit: typeof (a as any).limit === 'number' ? (a as any).limit : undefined,
-                    exts: Array.isArray((a as any).exts) ? (a as any).exts.map(String) : undefined,
-                    caseSensitive: !!(a as any).caseSensitive,
-                  })
+        let result: any
+        if (name === 'get_active_script') {
+          result = input.context.activeScript || null
+        } else if (name === 'list_selection') {
+          result = input.context.selection || []
+        } else if (name === 'list_open_documents') {
+          result = input.context.openDocs || []
+        } else if (name === 'list_children') {
+          const parentPath = typeof (a as any).parentPath === 'string' ? (a as any).parentPath : undefined
+          if (!parentPath) {
+            consecutiveValidationErrors++
+            const errMsg = 'parentPath is required'
+            pushChunk(streamKey, `error.validation ${String(name)} ${errMsg}`)
+            console.warn(`[orch] validation.error tool=${String(name)} ${errMsg}`)
+            const validationContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
+            convo.push({ role: 'assistant', content: toolXml })
+            convo.push({ role: 'user', content: validationContent })
+            appendHistory('system', validationContent)
+            continue
+          }
+          const depth = typeof (a as any).depth === 'number' ? (a as any).depth : undefined
+          const maxNodes = typeof (a as any).maxNodes === 'number' ? (a as any).maxNodes : undefined
+          const classWhitelist = (a as any).classWhitelist && typeof (a as any).classWhitelist === 'object' && !Array.isArray((a as any).classWhitelist)
+            ? (a as any).classWhitelist
+            : undefined
+          result = listSceneChildren(taskState, { parentPath, depth, maxNodes, classWhitelist })
+        } else if (name === 'get_properties') {
+          const targetPath = typeof (a as any).path === 'string' ? (a as any).path : undefined
+          if (!targetPath) {
+            consecutiveValidationErrors++
+            const errMsg = 'path is required'
+            pushChunk(streamKey, `error.validation ${String(name)} ${errMsg}`)
+            console.warn(`[orch] validation.error tool=${String(name)} ${errMsg}`)
+            const validationContent = `VALIDATION_ERROR ${String(name)}\n${errMsg}`
+            convo.push({ role: 'assistant', content: toolXml })
+            convo.push({ role: 'user', content: validationContent })
+            appendHistory('system', validationContent)
+            continue
+          }
+          const keys = Array.isArray((a as any).keys) ? (a as any).keys.map(String) : undefined
+          const includeAllAttributes = !!(a as any).includeAllAttributes
+          result = getSceneProperties(taskState, { path: targetPath, keys }, includeAllAttributes)
+        } else if (name === 'list_code_definition_names') {
+          result = listCodeDefinitionNames(taskState.taskId, {
+            root: typeof (a as any).root === 'string' ? (a as any).root : undefined,
+            limit: typeof (a as any).limit === 'number' ? (a as any).limit : undefined,
+            exts: Array.isArray((a as any).exts) ? (a as any).exts.map(String) : undefined,
+          })
+        } else {
+          result = searchFiles({
+            query: String((a as any).query ?? ''),
+            root: typeof (a as any).root === 'string' ? (a as any).root : undefined,
+            limit: typeof (a as any).limit === 'number' ? (a as any).limit : undefined,
+            exts: Array.isArray((a as any).exts) ? (a as any).exts.map(String) : undefined,
+            caseSensitive: !!(a as any).caseSensitive,
+          })
+        }
 
         const safeResult = name === 'get_active_script' && result && typeof (result as any).text === 'string'
           ? { ...(result as any), text: ((result as any).text as string).slice(0, 40000) }
@@ -884,10 +1449,104 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         continue
       }
 
-      const mapped = mapToolToProposals(String(name), a, input, msg)
+      const mapped = mapToolToProposals(String(name), a, input, msg, {
+        getScriptSource,
+        recordScriptSource,
+        recordPlanStart,
+        recordPlanUpdate,
+        userOptedOut,
+        geometryTracker,
+      })
+
+      if (mapped.contextResult !== undefined) {
+        setLastTool(input.projectId, String(name), mapped.contextResult)
+        pushChunk(streamKey, `tool.result ${String(name)}`)
+        const resultContent = `TOOL_RESULT ${String(name)}\n` + JSON.stringify(mapped.contextResult)
+        convo.push({ role: 'user', content: resultContent })
+        appendHistory('system', resultContent)
+        updateState((state) => {
+          const ts = Date.now()
+          state.runs.push({ id: id('run'), tool: String(name), input: a, status: 'succeeded', startedAt: ts, endedAt: ts })
+        })
+      }
+
+      const touchesLuau = mapped.proposals.length > 0 && mapped.proposals.some(proposalTouchesLuau)
+      const touchesGeometry = mapped.proposals.length > 0 && mapped.proposals.some(proposalTouchesGeometry)
+      if (touchesLuau) {
+        scriptWorkObserved = true
+      }
+      if (touchesGeometry) {
+        geometryWorkObserved = true
+      }
+
+      const isFinalPhase =
+        name === 'complete' ||
+        name === 'final_message' ||
+        name === 'attempt_completion' ||
+        (name === 'message' && typeof (a as any).phase === 'string' && (a as any).phase.toLowerCase() === 'final')
+
+      const scriptRequired = geometryWorkObserved && !scriptWorkObserved && !userOptedOut
+      if (isFinalPhase && scriptRequired) {
+        scriptWarnings += 1
+        consecutiveValidationErrors += 1
+        const warn =
+          'SCRIPT_REQUIRED Default Script Policy: add Luau in a Script/ModuleScript (open_or_create_script → show_diff) that rebuilds the created Instances before completing. Say "geometry only" if you really need to skip.'
+        pushChunk(streamKey, 'error.validation script_required')
+        console.warn(`[orch] validation.script_missing tool=${String(name)}`)
+        convo.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'user', content: warn })
+        appendHistory('system', warn)
+        if (consecutiveValidationErrors > validationRetryLimit || scriptWarnings > validationRetryLimit) break
+        continue
+      }
+
       if (mapped.proposals.length) {
+        updateState((state) => {
+          const policy = ensureScriptPolicy(state)
+          if (touchesGeometry) {
+            policy.geometryOps += 1
+          }
+          if (touchesLuau) {
+            policy.luauEdits += 1
+          }
+          for (const proposal of mapped.proposals) {
+            if (proposal.type === 'object_op') {
+              applyObjectOpsPreview(state, proposal.ops)
+            }
+          }
+        })
         pushChunk(streamKey, `proposals.mapped ${String(name)} count=${mapped.proposals.length}`)
         console.log(`[orch] proposals.mapped tool=${String(name)} count=${mapped.proposals.length}`)
+        // Stream assistant text for UI transcript
+        if (String(name) === 'final_message') {
+          const text = typeof (a as any).text === 'string' ? (a as any).text : undefined
+          if (text && text.trim().length > 0) {
+            if (!assistantFinalEmitted) pushChunk(streamKey, 'assistant.final ' + text)
+            assistantFinalEmitted = true
+          }
+        }
+        if (String(name) === 'message') {
+          const text = typeof (a as any).text === 'string' ? (a as any).text : undefined
+          const phase = typeof (a as any).phase === 'string' ? (a as any).phase : 'update'
+          if (text && text.trim().length > 0) {
+            pushChunk(streamKey, `assistant.${phase} ` + text)
+            if (phase === 'final') assistantFinalEmitted = true
+          }
+        }
+        if (String(name) === 'complete') {
+          const text = typeof (a as any).summary === 'string' ? (a as any).summary : undefined
+          if (text && text.trim().length > 0 && !assistantFinalEmitted) {
+            pushChunk(streamKey, 'assistant.final ' + text)
+            assistantFinalEmitted = true
+          }
+        }
+        if (String(name) === 'attempt_completion') {
+          const text = typeof (a as any).result === 'string' ? (a as any).result : undefined
+          if (text && text.trim().length > 0 && !assistantFinalEmitted) {
+            pushChunk(streamKey, 'assistant.final ' + text)
+            assistantFinalEmitted = true
+          }
+        }
         return finalize(mapped.proposals)
       }
       if (mapped.missingContext) {
@@ -910,6 +1569,10 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         convo.push({ role: 'user', content: errorContent })
         appendHistory('system', errorContent)
         if (unknownToolRetries > unknownToolRetryLimit) break
+        continue
+      }
+
+      if (mapped.contextResult !== undefined) {
         continue
       }
 

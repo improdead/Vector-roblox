@@ -4,6 +4,7 @@ import { markApplied, getProposal } from '../../../../../lib/store/proposals'
 import type { StoredProposal } from '../../../../../lib/store/proposals'
 import { updateStep } from '../../../../../lib/store/workflows'
 import { getTaskState, updateTaskState } from '../../../../../lib/orchestrator/taskState'
+import { applyObjectOpResult } from '../../../../../lib/orchestrator/sceneGraph'
 import { createCheckpoint, listCheckpoints } from '../../../../../lib/checkpoints/manager'
 import { pushChunk } from '../../../../../lib/store/stream'
 import { applyRangeEdits } from '../../../../../lib/diff/rangeEdits'
@@ -52,6 +53,11 @@ export async function POST(req: Request, ctx: { params: { id: string } }) {
   console.log(
     `[proposals.apply] id=${id} ok=${!!after} workflowId=${after?.workflowId || 'n/a'} payloadKeys=${Object.keys(body || {}).length}`,
   )
+  if (after?.workflowId) {
+    updateTaskState(after.workflowId, (state) => {
+      applyObjectOpResult(state, body)
+    })
+  }
   return Response.json({ ok: true, id, before, after })
 }
 
