@@ -2075,6 +2075,10 @@ local gui = nil
         local msg = string.gsub(line, "^assistant.update%s+", "")
         if _G.__VECTOR_UI and _G.__VECTOR_UI.addText then _G.__VECTOR_UI.addText(msg) end
     end
+    if string.find(lowerLine, "assistant.raw ") then
+        local msg = string.gsub(line, "^assistant.raw%s+", "")
+        if _G.__VECTOR_UI and _G.__VECTOR_UI.addText then _G.__VECTOR_UI.addText(msg) end
+    end
 
     if string.find(lowerLine, "checkpoint.auto ok") or string.find(lowerLine, "checkpoint.create ok") then
         local wf = _G.__VECTOR_LAST_WORKFLOW_ID

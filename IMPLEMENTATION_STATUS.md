@@ -14,10 +14,15 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 ## Recent Updates
 
-- Default script policy enforcement (October 2026):
-  - System prompt now outlines the policy explicitly and trims legacy examples so guidance is concise.
-  - Orchestrator tracks geometry/object ops vs Luau edits per workflow, respects user opt-outs, and blocks completion when geometry lacks matching builder code.
-  - Policy state is persisted in TaskState for consistent nudges across turns.
+- Scene-building prompt refresh (November 2026):
+  - Expanded prompt guidance now emphasizes `<start_plan>` usage, checking existing instances, and iteratively placing anchored parts. Added end-to-end house and farm examples to encourage geometry-first edits.
+  - Geometry intent still flips the opt-out flag, but script tools are no longer hard-blocked; behaviour now relies on prompt guidance instead of runtime enforcement.
+- Raw provider logging (November 2026):
+  - Every LLM reply is printed via `[orch] provider.raw …` for easier debugging of malformed XML/JSON payloads.
+- Default script policy tracking (October 2026):
+  - System prompt outlines the policy explicitly and trims legacy examples so guidance is concise.
+- Orchestrator tracks geometry/object ops vs Luau edits per workflow and respects user opt-outs. Attempts to finish after geometry-only work now surface `SCRIPT_REQUIRED` validation errors until matching Luau edits land, so the guard is actively enforced.
+- Policy state is persisted in TaskState for consistent nudges across turns and to keep the guard effective over multi-turn workflows.
 - Asset search integration (October 2026):
   - Backend now queries Roblox's public catalog directly (thumbnails included) when `CATALOG_API_URL` is unset or set to `roblox`, so local setups get real asset IDs without extra infra.
   - `CATALOG_DISABLE_SEARCH=1` can be used to force manual creation flows; otherwise `<search_assets>` proposals are allowed by default.

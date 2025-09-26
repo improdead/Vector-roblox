@@ -15,6 +15,39 @@ const JsonObjectFromString = z
 export const EditRange = z.object({ line: z.number(), character: z.number() })
 export const Edit = z.object({ start: EditRange, end: EditRange, text: z.string() })
 
+// Flexible steps field: accept JSON array or a string with <li>/<item> tags or newline bullets
+const StepsField = z
+  .union([z.array(z.string()), z.string()])
+  .transform((raw) => {
+    if (Array.isArray(raw)) return raw.map((s) => String(s).trim()).filter((s) => s.length > 0)
+    const s0 = String(raw || '').trim()
+    if (!s0) return [] as string[]
+    // Try strict JSON first
+    try {
+      const j = JSON.parse(s0)
+      if (Array.isArray(j)) return j.map((x) => String(x).trim()).filter((t) => t.length > 0)
+    } catch {}
+    // Extract <li>...</li> and <item>...</item>
+    const items: string[] = []
+    const pushMatches = (re: RegExp) => {
+      let m: RegExpExecArray | null
+      while ((m = re.exec(s0))) {
+        const t = (m[1] || '').replace(/<[^>]+>/g, '').trim()
+        if (t) items.push(t)
+      }
+    }
+    pushMatches(/<li[^>]*>([\s\S]*?)<\/li>/gi)
+    pushMatches(/<item[^>]*>([\s\S]*?)<\/item>/gi)
+    if (items.length) return items
+    // Fallback: strip tags and split by lines or bullet markers
+    const cleaned = s0.replace(/<[^>]+>/g, '\n')
+    const split = cleaned
+      .split(/\r?\n|(?:^|\s)[•*\-]\s+/g)
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+    return split
+  })
+
 const ParentEither = z
   .object({ parentPath: z.string() })
   .or(z.object({ parent: z.string() }))
@@ -36,7 +69,10 @@ export const Tools = {
       }
     }),
   start_plan: z.object({
-    steps: z.array(z.string()).min(1),
+    steps: StepsField,
+  }).refine((v) => Array.isArray((v as any).steps) && (v as any).steps.length > 0, {
+    path: ['steps'],
+    message: 'Provide at least one plan step',
   }),
   update_plan: z.object({
     completedStep: z.string().optional(),
@@ -44,13 +80,27 @@ export const Tools = {
     notes: z.string().optional(),
   }),
   // Scene/context discovery helpers (Roblox plugin-backed)
-  list_children: z.object({
-    parentPath: z.string(),
-    depth: z.number().min(0).max(10).optional(),
-    maxNodes: z.number().min(1).max(2000).optional(),
-    // Accept a simple record like { "Part": true, "Model": true }
-    classWhitelist: z.record(z.boolean()).optional(),
-  }),
+  list_children: z
+    .object({
+      parentPath: z.string().optional(),
+      // Be lenient: accept `path` as an alias for `parentPath`
+      path: z.string().optional(),
+      depth: z.number().min(0).max(10).optional(),
+      maxNodes: z.number().min(1).max(2000).optional(),
+      // Accept a simple record like { "Part": true, "Model": true }
+      classWhitelist: z.record(z.boolean()).optional(),
+    })
+    .transform((v) => ({
+      parentPath: v.parentPath || v.path,
+      depth: v.depth,
+      maxNodes: v.maxNodes,
+      classWhitelist: v.classWhitelist,
+    }))
+    .superRefine((value, ctx) => {
+      if (!value.parentPath || typeof value.parentPath !== 'string' || value.parentPath.length === 0) {
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['parentPath'], message: 'Required' })
+      }
+    }),
   get_properties: z.object({
     path: z.string(),
     keys: z.array(z.string()).optional(),

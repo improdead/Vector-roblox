@@ -8,8 +8,16 @@
 
 * **Studio Plugin (Luau)**: docked chat + proposals, reads active editor state, previews diffs, applies edits inside **ChangeHistoryService**. Provider configuration is read from the backend `.env`.
 * **Next.js Backend (TypeScript)**: `/api/chat`, `/api/stream`, `/api/proposals/:id/apply`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM.
-* **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval. Streaming includes clear indicators: `orchestrator.start …`, `tool.parsed <name>`, `tool.valid <name>`, `tool.result <name>`, `proposals.mapped <name> count=N`, `context.request <reason>`, and `error.*`.
+* **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval. Streaming includes clear indicators: `orchestrator.start …`, `tool.parsed <name>`, `tool.valid <name>`, `tool.result <name>`, `proposals.mapped <name> count=N`, `context.request <reason>`, and `error.*`. The web console now also prints `[orch] provider.raw …` so every raw model reply is visible for debugging.
   - Ask mode UI: a single transcript shows assistant text bubbles and compact tool chips. Completion proposals are echoed as assistant text; in Auto mode proposals auto-apply and render as chips only.
+
+### November 2026 Notes
+
+Recent prompt and orchestrator changes aim to make *geometry-first* scene building smoother:
+
+- The system prompt now nudges the model to plan before acting, list current instances, and iterate with `create_instance`/`set_properties` until visible results exist. Examples are illustrative only; they do not enforce specific content. The agent chooses relevant patterns (e.g., house) and must not introduce unrelated models (e.g., "Farm") unless explicitly requested.
+- Geometry intent is detected heuristically, but we no longer hard-block scripting; the prompt + example policy keeps the agent in direct manipulation mode unless the user explicitly requests reusable Luau.
+- Raw provider payloads are logged to the terminal via `[orch] provider.raw …`, which helps spot malformed XML/JSON immediately during runs.
 
 ---
 
@@ -65,6 +73,11 @@ Rules:
 
 ### Embedded planning and examples
 
+#### Examples policy (non-binding)
+- Examples in the prompt are guidance only and must not be treated as commands.
+- The agent should pick patterns that match the current goal or proceed without examples.
+- Never introduce unrelated names/content from examples (e.g., do not create "FarmBuilder" when asked to build a house).
+
 To keep `index.ts` concise, planner guidance and reference examples now live in:
 
 - `apps/web/lib/orchestrator/prompts/examples.ts`
@@ -72,7 +85,7 @@ To keep `index.ts` concise, planner guidance and reference examples now live in:
   - `QUALITY_CHECK_GUIDE`: checklist expectations that gate completion
   - `EXAMPLE_HOUSE_SMALL`: container + floor + four walls + roof sequence
   - `EXAMPLE_VEHICLE_CART`: chassis + wheel template
-  - `EXAMPLE_FARM_SCRIPT`: plan + script workflow that rebuilds a farm via Luau
+  - `EXAMPLES_POLICY`: examples are illustrative and non-binding; never introduce unrelated content from examples
 
 `index.ts` concatenates these strings onto `SYSTEM_PROMPT` at build time, so the model sees them, while we keep the source organized.
 
@@ -628,19 +641,19 @@ Wait for each tool result before the next step.
 | `list_children(path)`         | Explore hierarchy under a node          | `path`        | `[{ className, name, path }]`        | Plugin        |
 | `get_properties(path, keys?)` | Read specific props for an Instance     | `path, keys?` | `{ key:value }`                      | Plugin        |
 
-#### Plugin-only context tools (not exposed to the LLM)
+#### Context tool implementation notes
 
-These tools run only inside the Studio plugin and are not listed in the backend tool registry. They are useful for manual diagnostics and future expansion, but should not be advertised in the system prompt (to avoid invalid tool emissions).
+`get_properties` and `list_children` now appear in the backend tool registry, so the provider can call them just like any other context helper. The Studio plugin still executes them, but the orchestrator serves responses from the cached `TaskState` scene graph (hydrated after each apply/object proposal) so retries stay deterministic and sandboxes remain read-only.
 
-- get_properties(path, keys?, opts?)
+- `get_properties(path, keys?, includeAllAttributes?, maxBytes?)`
   - Purpose: Read selected properties and/or attributes of an Instance at `path`.
   - Params:
-    - `path` (string, required) — canonical GetFullName() path
+    - `path` (string, required) — canonical `GetFullName()` path
     - `keys` (string[], optional) — property names; entries beginning with `@` fetch attributes
-    - `opts` (object, optional) — `{ includeAllAttributes?: boolean, maxBytes?: number }` (default `maxBytes=32768`)
+    - `includeAllAttributes` (boolean, optional) — return every attribute when true
+    - `maxBytes` (number, optional) — server clamp; defaults to 32768 bytes
   - Returns: object map of requested fields with JSON-safe typed wrappers
-  - Constraints: response size capped by `maxBytes`
-  - Errors: missing/invalid `path` yields `{}`; unreadable properties are skipped
+  - Constraints: respects `maxBytes`; unknown properties are skipped instead of raising
   - Example:
     ```
     <get_properties>
@@ -649,16 +662,17 @@ These tools run only inside the Studio plugin and are not listed in the backend 
     </get_properties>
     ```
 
-- list_children(path)
-  - Purpose: Enumerate immediate children under a node
-  - Params: `path` (string, required)
-  - Returns: array of `{ className, name, path }`
-  - Constraints: implementation supports depth/maxNodes caps and optional class filtering internally
-  - Errors: if `path` is not found, returns `[]`
+- `list_children(parentPath, depth?, maxNodes?, classWhitelist?)`
+  - Purpose: Explore a subtree under `parentPath`, returning class/name/path triples.
+  - Params mirror the schema; `classWhitelist` expects an object like `{ "Part": true }`.
+  - Returns: `[{ path, name, className, children?[] }]`
+  - Constraints: respects depth/maxNodes caps; falls back to the cached scene graph when Studio hasn’t returned new data yet.
   - Example:
     ```
     <list_children>
-      <path>game.Workspace</path>
+      <parentPath>game.Workspace.House</parentPath>
+      <depth>2</depth>
+      <classWhitelist>{"Part":true,"Model":true}</classWhitelist>
     </list_children>
     ```
 
@@ -1377,7 +1391,7 @@ Each provider call includes:
 
 Alignment notes
 - Match: All “action” tools in schemas have corresponding plugin handlers, except `show_diff` (web‑only preview tool, mapped to proposals).
-- Plugin‑only reads: `get_properties.lua`, `list_children.lua` exist but are not wired in the web tool schema or orchestrator yet.
+- Context reads: `get_properties` and `list_children` flow through the tool schema; the orchestrator answers from the cached scene graph so repeated calls stay deterministic.
 - Web‑only: `show_diff` exists in schemas/orchestrator for diff preview; no plugin tool required because plugin renders diffs from proposals.
 
 Duplicates (expected)
@@ -1391,10 +1405,10 @@ Duplicates (expected)
 - `apps/web/app/api/assets/generate3d/route.ts`: stub; returns a `jobId` only. No GPU backend yet.
 - `apps/web/lib/catalog/search.ts`: real provider requires `CATALOG_API_URL` (optional `CATALOG_API_KEY`). If unset, serves stubbed results.
 - `plugin/src/tools/list_open_documents.lua`: placeholder due to limited Studio APIs; returns only the active script.
-- `plugin/src/tools/get_properties.lua`, `plugin/src/tools/list_children.lua`: implemented but not exposed in the web tool schema; currently unused by the LLM.
+- `plugin/src/tools/get_properties.lua`, `plugin/src/tools/list_children.lua`: run in Studio and feed the orchestrator’s scene snapshot; both are available to the LLM through the tool registry.
 
 Optional next steps
-- Decide whether to surface `get_properties`/`list_children` as read‑only “context tools” in the web tool registry.
+- Expand scene snapshot streaming to include lightweight prop diffs so repeated `get_properties` queries stay fresh without extra fetches.
 - Implement real 3D generation backend or hide `generate_asset_3d` until ready.
 
 ---
@@ -1439,8 +1453,7 @@ All of the above log to the Next.js terminal by default. The same high‑signal 
 
 ## Tool Inventory (Web ↔ Plugin)
 
-- Shared (wired): `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `list_code_definition_names`, `search_files`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`.
+- Shared (wired): `get_active_script`, `list_selection`, `list_open_documents` (placeholder), `list_children`, `get_properties`, `list_code_definition_names`, `search_files`, `apply_edit`, `create_instance`, `set_properties`, `rename_instance`, `delete_instance`, `search_assets`, `insert_asset`.
 - Web‑only: `show_diff` (proposal preview), `generate_asset_3d` (stubbed API; plugin calls endpoint).
-- Plugin‑only (currently unused by LLM): `get_properties`, `list_children`.
 
 No hard duplicates in a single runtime; mirrored implementations across TS/Luau are expected.

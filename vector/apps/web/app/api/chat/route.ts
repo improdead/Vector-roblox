@@ -57,6 +57,7 @@ export async function POST(req: Request) {
     console.log(
       `[chat] project=${input.projectId} mode=${input.mode || 'agent'} provider=${providerName} model=${model} useProvider=${useProvider} msgLen=${input.message.length}`,
     )
+    console.log('[chat] prompt:', input.message)
     // Optionally bootstrap a workflow
     const { createWorkflow, getWorkflow, appendStep } = await import('../../../lib/store/workflows')
     const { pushChunk } = await import('../../../lib/store/stream')

@@ -111,10 +111,10 @@ import { annotateAutoApproval } from './autoApprove'
 import {
   PLANNER_GUIDE,
   QUALITY_CHECK_GUIDE,
-  EXAMPLE_FARM_SCRIPT,
   COMPLEXITY_DECISION_GUIDE,
   TOOL_REFERENCE,
   ROLE_SCOPE_GUIDE,
+  EXAMPLES_POLICY,
 } from './prompts/examples'
 import {
   buildInstancePath,
@@ -315,9 +315,10 @@ const PROMPT_SECTIONS = [
   - insert_asset defaults parentPath to game.Workspace if unknown.
   - If catalog search fails or is disabled, build manually with create_instance/set_properties or Luau. Never complete without placing the objects requested.`,
   `Scene building
-  - When the user asks to build or decorate the scene, keep placing anchored Parts/Models with create_instance and set_properties until the structures are visible.
-  - Avoid returning empty Models; specify Size/CFrame so geometry appears exactly where the user expects.
-  - Reserve scripting-only flows for users who explicitly request code. Otherwise prefer direct instance manipulation.`,
+  - Always think through the layout before acting: use <start_plan> to outline the main structures, then execute steps one tool at a time.
+  - Inspect what already exists. If nothing is selected, call <list_children> on game.Workspace (depth 1–2) to inventory the scene; also use <list_selection> and <get_active_script>. Reuse or extend Models instead of duplicating them.
+  - Build geometry iteratively with create_instance/set_properties, anchoring parts and setting Size/CFrame so progress is visible in Workspace.
+  - Only switch to scripting when the user explicitly wants reusable code or behaviour. Otherwise stay in direct manipulation mode.`,
   `Quality checks
 - Derive a short checklist from the user prompt and track progress (optionally via <message phase="update">).
 - Do not call <complete> until every checklist item exists and the matching Luau is written (unless the user opted out).
@@ -325,16 +326,10 @@ const PROMPT_SECTIONS = [
   `Validation & recovery
 - On VALIDATION_ERROR, retry the SAME tool once with corrected args (no commentary or tool switching).
 - If you would otherwise reply with no tool, either choose exactly one tool or finish with <complete>.`,
-  String.raw`Quick examples
-<create_instance>
-  <className>Part</className>
-  <parentPath>game.Workspace</parentPath>
-  <props>{"Name":"Pad","Anchored":true,"Size":{"__t":"Vector3","x":6,"y":1,"z":6},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
-</create_instance>
-
-<show_diff>
-  <path>game.ServerScriptService.Builder</path>
-  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"local Builder = {}\nfunction Builder:apply(root)\n  local pad = Instance.new(\"Part\", root)\n  pad.Name = \"Pad\"\n  pad.Anchored = true\n  pad.Size = Vector3.new(6, 1, 6)\n  pad.CFrame = CFrame.new(0, 0.5, 0)\nend\nreturn Builder\n"}]</show_diff>
+String.raw`Quick examples
+<start_plan>
+  <steps>["Check existing selection","Create 'House' shell","Add floor and walls","Add roof","Detail interior or exit"]</steps>
+</start_plan>
 
 <create_instance>
   <className>Model</className>
@@ -345,13 +340,19 @@ const PROMPT_SECTIONS = [
 <create_instance>
   <className>Part</className>
   <parentPath>game.Workspace.House</parentPath>
-  <props>{"Name":"Floor","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
+  <props>{"Name":"Floor","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]},"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"WoodPlanks"}}</props>
 </create_instance>
 
 <create_instance>
   <className>Part</className>
   <parentPath>game.Workspace.House</parentPath>
-  <props>{"Name":"WallFront","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":8,"z":1},"CFrame":{"__t":"CFrame","comps":[0,4.5,-7.5, 1,0,0, 0,1,0, 0,0,1]}}</props>
+  <props>{"Name":"WallFront","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":8,"z":1},"CFrame":{"__t":"CFrame","comps":[0,4.5,-7.5, 1,0,0, 0,1,0, 0,0,1]},"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Brick"}}</props>
+</create_instance>
+
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.House</parentPath>
+  <props>{"Name":"Roof","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,8.6,0, 1,0,0, 0,0.5,-0.8660254, 0,0.8660254,0.5]},"Color":{"__t":"Color3","r":0.6,"g":0.2,"b":0.2}}</props>
 </create_instance>`
 ]
 
@@ -365,9 +366,9 @@ const SYSTEM_PROMPT = PROMPT_SECTIONS.join('\n\n')
   + '\n'
   + QUALITY_CHECK_GUIDE
   + '\n'
-  + EXAMPLE_FARM_SCRIPT
+  + EXAMPLES_POLICY
   + '\n'
-+ ROLE_SCOPE_GUIDE
+  + ROLE_SCOPE_GUIDE
 
 
 function tryParseJSON<T = any>(s: unknown): T | undefined {
@@ -1164,7 +1165,17 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           : defaultMaxTurns,
     )
     if (!messages) {
-      messages = [{ role: 'user', content: providerFirstMessage }]
+      const plan = taskState.plan
+      if (plan && Array.isArray(plan.steps) && plan.steps.length > 0) {
+        const planContext = `PLAN_CONTEXT\n` +
+          JSON.stringify({ steps: plan.steps, completed: plan.completed || [], currentIndex: plan.currentIndex ?? 0, notes: plan.notes || undefined })
+        messages = [
+          { role: 'user', content: planContext },
+          { role: 'user', content: providerFirstMessage },
+        ]
+      } else {
+        messages = [{ role: 'user', content: providerFirstMessage }]
+      }
     }
     const convo = messages
     if (!convo) break
@@ -1249,6 +1260,10 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
       const tool = parseToolXML(content)
       if (!tool) {
+        const rawText = content.trim()
+        if (rawText.length > 0) {
+          pushChunk(streamKey, 'assistant.raw ' + rawText)
+        }
         // Enforce no-text-only turns: nudge to choose a tool or complete
         const hint = 'NO_TOOL_USED Please emit exactly one tool or call <complete><summary>…</summary></complete> to finish.'
         convo.push({ role: 'user', content: hint })

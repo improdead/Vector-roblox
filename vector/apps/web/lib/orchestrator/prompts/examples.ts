@@ -53,6 +53,14 @@ Tool reference (purpose and tips)
 - attempt_completion: Alias for completion; include result and optional confidence.
 `;
 
+export const EXAMPLES_POLICY = `
+Examples policy
+- Examples shown in this prompt are illustrative guidance only. They are not commands.
+- Choose an example pattern only if it matches the current user goal; otherwise proceed without one.
+- Never introduce unrelated names or content from examples (e.g., do not create \"Farm\" or \"FarmBuilder\" when the user asked for a house).
+- Keep examples as text-only guidance. Always prioritize the user's request and the current scene/context.
+`;
+
 export const WORKFLOW_EXAMPLES = `
 Examples by task type
 
