@@ -3,15 +3,17 @@
 
 export const PLANNER_GUIDE = `
 Planning
-- Translate the user's request into concrete build goals (shell, details, styling, behaviors).
-- Decide if planning is needed:
-  - Skip planning for a single, obvious action (e.g., rename, toggle Anchored, one small show_diff).
-  - Use planning when multi-step, ambiguous, or cross-file/scene changes are involved.
-- If planning, call <start_plan> with an ordered list of short, actionable steps.
-- Keep each step to a single tool (create_instance, set_properties, show_diff, etc.).
-- Use <update_plan> as you progress (mark completed steps, note discoveries, add the next target).
-- Start with container Models, add geometry with create_instance, then refine using set_properties.
-- Revisit and adjust the plan as new context arrives; surface key updates with <message> when useful.
+- Translate the user's goal into specific placements and code changes.
+- When planning, produce a DETAILED, TOOL-ORIENTED step list via <start_plan>.
+  - 8–15 concise steps typical for multi‑object builds; more if needed.
+  - One tool per step and name the exact action:
+    - The tool name (create_instance, set_properties, search_assets, insert_asset, open_or_create_script, show_diff, ...)
+    - The exact target (className, path/parentPath, and Name)
+    - The intention (e.g., size/position, purpose like "outer fence", or code outcome)
+  - Examples of good step text: "Create Model 'MilitaryBase' under game.Workspace", "Search assets: query='watch tower' tags=['model'] limit=6", "Insert asset 123456789 under game.Workspace.MilitaryBase", "Set CFrame/Anchored for 'Gate' at (0,0,50)", "Open or create Script 'BaseBuilder' in ServerScriptService", "Show diff to insert idempotent Luau that rebuilds placed structures".
+- Prefer assets first: plan searches and inserts before manual geometry. Use create_instance for primitives or when search/insert is unavailable.
+- Use <update_plan> as you progress (mark completed, set next, add notes). Keep steps small and verifiable.
+- Always add a Luau step (unless user opted out) to rebuild what was created.
 `;
 
 export const COMPLEXITY_DECISION_GUIDE = `
@@ -22,6 +24,7 @@ When to plan
   - Insert a small code snippet with one <show_diff> edit.
 - Plan-needed examples (multi-step):
   - Create a new Model + multiple Parts with precise placements.
+  - Asset-first builds: search_assets → insert_asset (several items) → set_properties to arrange → script authoring.
   - Author or refactor a script across several functions/files.
   - Search → open/create script → edit Source → verify with context queries.
 `;

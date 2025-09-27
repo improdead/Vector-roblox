@@ -293,6 +293,8 @@ const PROMPT_SECTIONS = [
 - Proposal-first and undoable: never change code/Instances outside a tool; keep each step small and reviewable.
 - Plan when work spans multiple steps. For a single obvious action you may act without <start_plan>.
 - Keep responses to that single tool tag (no markdown or invented tags). Optional brief explanatory text may appear before the tag when allowed.` ,
+  `Planning details
+- For non-trivial tasks, your <start_plan> MUST list detailed, tool-specific steps (8–15 typical): include the tool name, exact target (class/path/name), and the intended outcome. Example: "Create Model 'Base' under game.Workspace", "Search assets query='barracks'", "Insert asset 12345 under game.Workspace.Base", "Set CFrame for 'Gate' to (0,0,50)", "Open or create Script 'BaseBuilder'", "Show diff to add idempotent Luau".`,
   `Default Script Policy
 - Whenever you create, modify, or insert Instances (create_instance/set_properties/rename_instance/delete_instance/insert_asset/generate_asset_3d), you must author Luau that rebuilds the result before completing.
 - Preferred flow: open_or_create_script → show_diff (or apply_edit when already previewed). Scripts must be valid, idempotent, and set Anchored/props explicitly.
@@ -311,9 +313,9 @@ const PROMPT_SECTIONS = [
 - Attributes use "@Name" keys.
 - Edits are 0-based, non-overlapping, ≤20 edits and ≤2000 inserted chars.`,
   `Assets & 3D
+  - Prefer search_assets → insert_asset for props/models. Use create_instance only for simple primitive geometry or when catalog search fails/disabled.
   - search_assets limit ≤ 6 unless the user asks. Include helpful tags.
-  - insert_asset defaults parentPath to game.Workspace if unknown.
-  - If catalog search fails or is disabled, build manually with create_instance/set_properties or Luau. Never complete without placing the objects requested.`,
+  - insert_asset defaults parentPath to game.Workspace if unknown.`,
   `Scene building
   - Always think through the layout before acting: use <start_plan> to outline the main structures, then execute steps one tool at a time.
   - Inspect what already exists. If nothing is selected, call <list_children> on game.Workspace (depth 1–2) to inventory the scene; also use <list_selection> and <get_active_script>. Reuse or extend Models instead of duplicating them.
@@ -327,8 +329,37 @@ const PROMPT_SECTIONS = [
 - On VALIDATION_ERROR, retry the SAME tool once with corrected args (no commentary or tool switching).
 - If you would otherwise reply with no tool, either choose exactly one tool or finish with <complete>.`,
 String.raw`Quick examples
+Detailed plan (assets-first)
 <start_plan>
-  <steps>["Check existing selection","Create 'House' shell","Add floor and walls","Add roof","Detail interior or exit"]</steps>
+  <steps>[
+    "Create Model 'MilitaryBase' under game.Workspace",
+    "Search assets query='watch tower' tags=['model'] limit=6",
+    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
+    "Search assets query='barracks' tags=['model'] limit=6",
+    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
+    "Search assets query='fence' tags=['model'] limit=6",
+    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
+    "Set properties (Anchored, CFrame) to arrange towers, barracks, fence perimeter",
+    "Open or create Script 'BaseBuilder' in game.ServerScriptService",
+    "Show diff to add idempotent Luau that rebuilds the base"
+  ]</steps>
+</start_plan>
+
+Insert an asset (preferred)
+<search_assets>
+  <query>oak tree</query>
+  <tags>["tree","nature"]</tags>
+  <limit>6</limit>
+</search_assets>
+
+<insert_asset>
+  <assetId>123456789</assetId>
+  <parentPath>game.Workspace</parentPath>
+</insert_asset>
+
+Build simple geometry
+<start_plan>
+  <steps>["Create 'House' model under Workspace","Create 'Floor' Part with size 16x1x16 at y=0.5 Anchored","Create 'WallFront' Part 16x8x1 at z=-7.5 Anchored","Create 'Roof' Part 16x1x16 with slight tilt Anchored"]</steps>
 </start_plan>
 
 <create_instance>
