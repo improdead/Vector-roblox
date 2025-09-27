@@ -1,4 +1,5 @@
 import { readJSON, writeJSON } from '../store/persist'
+import type { DefinitionInfo } from '../tools/codeIntel'
 
 export type ChatMessage = { role: 'user' | 'assistant' | 'system'; content: string; at: number }
 export type ToolRunStatus = 'queued' | 'running' | 'succeeded' | 'failed'
@@ -13,6 +14,33 @@ export interface ToolRun {
   error?: { message: string; code?: string; retried?: number }
 }
 
+export type SceneNode = {
+  path: string
+  parentPath?: string
+  name: string
+  className: string
+  props: Record<string, unknown>
+}
+
+export type SceneGraph = {
+  nodes: Record<string, SceneNode>
+}
+
+export type PlanState = {
+  steps: string[]
+  completed: string[]
+  currentIndex: number
+  notes?: string
+}
+
+export type ScriptPolicyState = {
+  geometryOps: number
+  luauEdits: number
+  userOptedOut?: boolean
+  lastOptOutAt?: number
+  nudgedAt?: number
+}
+
 export interface TaskState {
   taskId: string
   history: ChatMessage[]
@@ -20,6 +48,11 @@ export interface TaskState {
   streaming: { isStreaming: boolean; indexedUpTo?: number }
   autoApproval: { enabled: boolean; readFiles: boolean; editFiles: boolean; execSafe: boolean }
   counters: { tokensIn: number; tokensOut: number; contextRequests: number }
+  scriptSources?: Record<string, string>
+  scene?: SceneGraph
+  plan?: PlanState
+  policy?: ScriptPolicyState
+  codeDefinitions?: DefinitionInfo[]
   /**
    * Identifier of the most recently created checkpoint. Mirrors the top-level
    * metadata stored inside `checkpoints` for quick access in the UI.
@@ -62,6 +95,24 @@ function ensureCheckpointFields(state: TaskState): TaskState {
   if (state.lastCheckpointId && !state.checkpoints.lastId) {
     state.checkpoints.lastId = state.lastCheckpointId
   }
+  if (!state.scriptSources || typeof state.scriptSources !== 'object') {
+    state.scriptSources = {}
+  }
+  if (!Array.isArray(state.codeDefinitions)) {
+    state.codeDefinitions = []
+  }
+  if (!state.scene || typeof state.scene !== 'object' || typeof (state.scene as any).nodes !== 'object') {
+    state.scene = { nodes: {} }
+  }
+  if (!state.plan || !Array.isArray(state.plan.steps)) {
+    state.plan = { steps: [], completed: [], currentIndex: 0 }
+  }
+  if (!state.policy || typeof state.policy !== 'object') {
+    state.policy = { geometryOps: 0, luauEdits: 0 }
+  } else {
+    state.policy.geometryOps = Math.max(0, Number(state.policy.geometryOps) || 0)
+    state.policy.luauEdits = Math.max(0, Number(state.policy.luauEdits) || 0)
+  }
   return state
 }
 
@@ -74,6 +125,11 @@ function defaultState(taskId: string): TaskState {
     streaming: { isStreaming: false },
     autoApproval: { enabled: false, readFiles: false, editFiles: false, execSafe: false },
     counters: { tokensIn: 0, tokensOut: 0, contextRequests: 0 },
+    scriptSources: {},
+    codeDefinitions: [],
+    scene: { nodes: {} },
+    plan: { steps: [], completed: [], currentIndex: 0 },
+    policy: { geometryOps: 0, luauEdits: 0 },
     checkpoints: { count: 0 },
     updatedAt: now,
   }

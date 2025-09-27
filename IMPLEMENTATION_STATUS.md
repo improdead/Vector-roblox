@@ -14,14 +14,37 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 ## Recent Updates
 
-- Asset fallback removal (August 2026):
-  - Orchestrator no longer emits a catalog `asset_op` fallback when runs end without a tool; instead it streams `fallback.asset manual_required`, injects an error message instructing the model to build the object via Luau/create_instance, and raises `fallback.asset disabled` if the provider still does nothing.
-  - `search_assets` tool calls now return a validation error when the catalog proxy is not configured, pushing models to skip lookup attempts and proceed directly to manual instance creation.
-  - Plugin and backend logs now clearly indicate when manual creation is required because catalog lookup failed or was skipped.
+- Scene-building prompt refresh (November 2026):
+  - Expanded prompt guidance now emphasizes `<start_plan>` usage, checking existing instances, and iteratively placing anchored parts. Added end-to-end house and farm examples to encourage geometry-first edits.
+  - Geometry intent still flips the opt-out flag, but script tools are no longer hard-blocked; behaviour now relies on prompt guidance instead of runtime enforcement.
+- Raw provider logging (November 2026):
+  - Every LLM reply is printed via `[orch] provider.raw …` for easier debugging of malformed XML/JSON payloads.
+- Tool result message role (Dec 2026):
+  - Tool results are now echoed back into the provider conversation as `user` messages (instead of `system`). This fixes models ignoring prior context tool outputs (e.g., `list_children`) and prematurely claiming the workspace is empty.
+  - Paths: `apps/web/lib/orchestrator/index.ts:1531, 1553`.
+- Parser robustness (Dec 2026):
+  - `coercePrimitive` unwraps ```json fenced blocks and escapes bare newlines inside JSON strings before parsing.
+  - `parseToolXML` returns `{ name, args, prefixText, suffixText }`, enabling optional “text before tool” streaming in the UI.
+  - Added a tiny `parseXmlObject` to accept XML‑ish `<props><Name>Foo</Name></props>` emitted by some models.
+  - Env flags: `VECTOR_ALLOW_TEXT_BEFORE_TOOL=1`, `VECTOR_ENFORCE_TOOL_AT_END=1`.
+- Auto‑create missing parents (Dec 2026):
+  - When a tool requests `create_instance` under `Workspace.<Name>` and that parent path doesn’t exist in the scene snapshot, the orchestrator prepends one or more `create_instance(Model)` ops under `game.Workspace` to construct the missing chain, then appends the requested child op. This removes the need to manually select the parent.
+  - Scope: limited to Workspace descendants; safe and deterministic.
+  - Path: `apps/web/lib/orchestrator/index.ts` in the `create_instance` mapping.
+- Plugin UI fixes (Dec 2026):
+  - Tooltip helper hoisted; removed nil call on hover. Guarded `.Visible` toggles on completion cards to avoid rare nils in `renderProposals`.
+- Default script policy tracking (October 2026):
+  - System prompt outlines the policy explicitly and trims legacy examples so guidance is concise.
+- Orchestrator tracks geometry/object ops vs Luau edits per workflow and respects user opt-outs. Attempts to finish after geometry-only work now surface `SCRIPT_REQUIRED` validation errors until matching Luau edits land, so the guard is actively enforced.
+- Policy state is persisted in TaskState for consistent nudges across turns and to keep the guard effective over multi-turn workflows.
+- Asset search integration (October 2026):
+  - Backend now queries Roblox's public catalog directly (thumbnails included) when `CATALOG_API_URL` is unset or set to `roblox`, so local setups get real asset IDs without extra infra.
+  - `CATALOG_DISABLE_SEARCH=1` can be used to force manual creation flows; otherwise `<search_assets>` proposals are allowed by default.
+  - Plugin forwards model-provided tags to `/api/assets/search`, enabling category-aware lookups without bespoke proxy services.
 - Provider selection hardening (July 2026):
   - Added a deterministic provider chooser so OpenRouter and Gemini never mix credentials or model overrides, honoring `VECTOR_DEFAULT_PROVIDER` plus user overrides.
   - Gemini client now enforces type-checked responses and fails fast on empty or safety-blocked completions, keeping the orchestrator from continuing with blank output.
-  - Catalog search logging sanitizes queries and emits stub/no-result metadata, while the system prompt spells out when to fall back to manual instance creation.
+  - Catalog search logging sanitizes queries, records provider (roblox vs proxy), and still nudges models to fall back to manual creation if catalog lookups fail.
   - `.env.example` and `.env.local` were deduplicated with a single provider block covering `GEMINI_*` settings alongside OpenRouter.
 - Checkpoints + conflict loop (July 2026):
   - Automatic per-user-message checkpoints now run after each applied proposal; manual Snapshot/Restore buttons in the plugin call the API, stream status updates, and refresh TaskState metadata.
@@ -65,11 +88,13 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 - Added detailed logging across orchestrator and API routes (see Vector.md “Logging & Observability”).
 - Relaxed chat input schema: `context.activeScript` is now optional (was required `object|null`). This avoids HTTP 400 when no script is open in Studio; the provider can request context via tools when needed.
 - Studio plugin UI: status panel is hidden until the first planning/status line arrives (prevents an empty black block under the composer). Composer now auto-sizes vertically and reflows the layout.
+  - Transcript unification (Sept 2025): single transcript shows assistant text bubbles and compact tool chips. Proposals render inline; in Auto mode they auto-apply and show as chips only.
+  - Ask-mode streaming (Sept 2025): added `message(text, phase)` tool and stream lines (`assistant.start|update|final`). `final_message` remains as shorthand.
 - Upgraded system prompt and argument encoding rules (Cline‑style). Strict XML with JSON‑encoded parameter bodies; guidance for context gathering and validation retries.
 - Parser hardening: tolerant JSON‑like parsing for tool parameters (single quotes, unquoted keys, trailing commas, and accidental code fences). Fixes repeated `props: Expected object, received string` errors from some models.
 - Tool schemas now accept `props` as an object OR stringified JSON (coerced) for `create_instance` and `set_properties`.
 - Path resolver in plugin supports bracket segments like `game.Workspace["My.Part"]["Wall [A]"]`.
-- System prompt expanded with: output framing (exactly one tool tag), paths & names guardrails, typed wrappers contract for Roblox values, mode hints (Ask/Agent/Auto), asset/3D caveats, and copy‑ready examples.
+- System prompt expanded with: output framing (exactly one tool tag), paths & names guardrails, typed wrappers contract for Roblox values, mode hints (Ask/Agent/Auto), asset/3D caveats, copy‑ready examples, discovery tools (`list_children`, `get_properties`), search semantics, and general manual build quality guidance (structures/vehicles/props). Planner guidance + canonical examples (house, vehicle, farm script) now live in `apps/web/lib/orchestrator/prompts/examples.ts` and are concatenated to `SYSTEM_PROMPT` in code.
 - Orchestrator selection defaults: when exactly one instance is selected, infer missing `path`/`parentPath` for common tools (`set_properties`, `rename_instance`, `delete_instance`, `create_instance`, `insert_asset`).
 - Edit constraints enforced server‑side: sort + non‑overlap check, with caps (≤20 edits, ≤2000 inserted characters). Invalid edits trigger validation feedback.
 - Delete guard: refusing `delete_instance` at `game`/service roots to prevent destructive mistakes.
@@ -90,7 +115,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - `vector/apps/web/lib/orchestrator/index.ts:1`
     - Supports mention attachments (`@file`, `@folder`, `@url`) with automatic TaskState compaction and provider-visible context blocks.
   - Deterministic templates for milestone verification
-    - Recognizes “grid 3x3” and “farming” and returns sequential object-op proposals without provider.
+    - (Deprecated) Removed old grid/farming shortcuts so requests always run through planning + scripting flow.
     - Edit proposals include `safety.beforeHash` for conflict detection.
   - Multi-turn Plan/Act loop with context tools (`get_active_script`, `list_selection`, `list_open_documents`).
     - Executes context tools locally, feeds JSON results back to the provider, and continues until an action tool is emitted or max turns is reached.
@@ -100,12 +125,23 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - Validation retries and diagnostics
     - On zod validation failure, reflect the error back to the model and retry up to 2 times, then error out.
     - Unknown tool names are echoed back once as a validation error to allow self-correction.
+  - Mandatory planning
+    - First action must be `<start_plan>`; other tools are rejected until a plan exists.
+    - `<update_plan>` mutates TaskState and emits `plan.start/plan.update` stream chunks for UI feedback.
+  - Script tracking & completion gate
+    - Maintains per-workflow `scriptSources` cache (persisted in TaskState) so Luau edits know the latest Source text.
+    - `open_or_create_script` backs creation of empty Scripts and returns `{ path, text, created }`; subsequent edits use `show_diff`/`set_properties` against that baseline.
+    - `<complete>` / `<final_message>` are rejected until a non-empty Luau Source edit has been proposed.
   - Emits structured status/error chunks via in-memory stream store. The stream store now cleans idle workflows periodically to prevent memory leaks.
     - Env: `VECTOR_DISABLE_FALLBACKS=1` to disable server-side fallbacks (errors surface to client).
     - `vector/apps/web/lib/orchestrator/index.ts:1`
   - Tool schemas (Zod): strict validation for all advertised tools.
     - `vector/apps/web/lib/tools/schemas.ts:1`
     - Includes read-only `list_code_definition_names` and `search_files` definitions.
+    - Added context tools `list_children` and `get_properties` to schemas.
+    - Added `open_or_create_script(path,parentPath?,name?)` schema.
+    - Added planning tools `start_plan(steps[])` and `update_plan(...)` (mandatory before actions).
+    - Added `final_message(text,confidence?)` (Ask-mode friendly). Orchestrator maps it to a completion and emits `assistant.final` stream lines for the plugin transcript.
     - Includes read-only code intelligence tools `list_code_definition_names` and `search_files`.
   - Provider adapter (OpenRouter-compatible, OpenAI Chat Completions).
     - `vector/apps/web/lib/orchestrator/providers/openrouter.ts:1`
@@ -131,7 +167,7 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - Event-driven wait using the shared stream bus (no tight polling loop).
   - `GET /api/stream/sse`: Server-Sent Events endpoint for the same stream (dashboards/CLI).
     - `vector/apps/web/app/api/stream/sse/route.ts:1`
-  - `GET /api/assets/search`: calls catalog provider with stub fallback if `CATALOG_API_URL` unset.
+  - `GET /api/assets/search`: hits Roblox catalog when `CATALOG_API_URL` unset, or proxies when configured.
     - `vector/apps/web/app/api/assets/search/route.ts:1`
     - `vector/apps/web/lib/catalog/search.ts:1`
       - Adds fetch timeout via AbortController (env `CATALOG_TIMEOUT_MS`, default 15000ms).
@@ -163,9 +199,10 @@ This document tracks what’s implemented, partial (placeholder or limited), and
       - `vector/plugin/src/tools/get_active_script.lua:1`
       - `vector/plugin/src/tools/list_selection.lua:1`
       - `vector/plugin/src/tools/list_open_documents.lua:1`
-    - Scene queries: `list_children`, `get_properties` (implemented)
-      - `vector/plugin/src/tools/list_children.lua:1`
-      - `vector/plugin/src/tools/get_properties.lua:1`
+  - Scene queries: `list_children`, `get_properties` now return data from an in-memory scene graph that mirrors applied/object proposals.
+    - Backend tracks created/renamed/deleted instances and property updates per workflow (`vector/apps/web/lib/orchestrator/sceneGraph.ts:1`).
+    - Context tools surface that projection to the model so it can inspect existing builds.
+  - Studio plugin now captures a bounded snapshot of `Workspace` (path/class/Name + basic props) on each chat send and includes it in the request context so the scene graph starts from real geometry (`vector/plugin/src/main.server.lua`).
     - Editing/object ops: `apply_edit` (enhanced with ScriptEditorService fallbacks), `create_instance`, `set_properties`, `rename_instance`, `delete_instance` (ChangeHistory wrapped)
       - `vector/plugin/src/tools/apply_edit.lua:1`
       - `vector/plugin/src/tools/create_instance.lua:1`
@@ -190,8 +227,10 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - `vector/plugin/src/tools/generate_asset_3d.lua:1`
 
 - Asset Catalog integration
-  - Uses stubbed results if `CATALOG_API_URL` is unset. No thumbnails proxying.
+  - Direct Roblox catalog search with thumbnail lookups when `CATALOG_API_URL` is unset; proxy/caching still optional.
   - `vector/apps/web/lib/catalog/search.ts:1`
+  - Insert is user‑driven: the plugin shows a search result list with per‑item “Insert” buttons; clicking triggers `InsertService:LoadAsset(assetId)` then reports `/api/proposals/:id/apply`.
+  - The agent will prefer manual geometry unless prompted to use catalog (by design of the current prompt).
 
 - Tool module integration (plugin)
   - Decision: Fully dispatch through `src/tools/*.lua`.
@@ -210,6 +249,10 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - Advanced chat shortcuts
   - Quick menu covers Retry/Next, but there are still no dedicated buttons for one-click “Ask” prompts, context presets, or slash-command menus.
+
+- Agent‑driven Studio selection
+  - There is no tool to change Studio selection from the orchestrator. Selection is read‑only context captured by the plugin and used for sensible defaults.
+  - If needed, we can add a new tool and proposal op (e.g., `set_selection(paths[])`) plus a minimal plugin handler to set `Selection` and optionally focus the camera. This is optional given the new auto‑create behavior.
 
 - Conversation summarization & guardrails
   - Context auto-request and history trimming are in place, but full summarization, guardrail prompts, and cross-run memory limits remain TODO.
@@ -243,9 +286,9 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - Optional: set `OPENROUTER_TIMEOUT_MS` (default 30000) to cap provider calls.
 
 - Catalog provider
-  - Provide `CATALOG_API_URL` that returns normalized `{ results: [{ id, name, creator, type, thumbnailUrl? }] }`.
-  - Optional `CATALOG_API_KEY` used as `Authorization: Bearer <key>` header.
-  - Or confirm usage of stubbed results during local development.
+  - Built-in Roblox catalog search now runs when `CATALOG_API_URL` is unset (or set to `roblox`); no proxy is required for local workflows.
+  - Set `CATALOG_API_URL` to your own proxy if you need custom filtering/caching, and pass `CATALOG_API_KEY` for auth when applicable.
+  - Use `CATALOG_DISABLE_SEARCH=1` to force manual scene creation instead of catalog lookups.
 
 - 3D generation pipeline
   - Confirm Meshy configuration for production (API limits, status/polling endpoint, retries).
@@ -293,8 +336,9 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 - Refine streaming UI indicators; add retention policy and filters for `/api/stream`.
 - Expand orchestrator to full multi-turn Plan/Act with retries and guardrails; wire new context tools (`list_children`, `get_properties`).
 - Improve server diff merging for multi-edit proposals; consider hashing and conflict detection.
+- Design and implement `run_scene_patch` (ModuleScript patch runner) once sandboxing + timeouts are specified; currently deferred.
 - Replace file-backed JSON with SQLite/Prisma for proposals/audit; add filtering endpoints (by `projectId`).
-- Real Catalog integration and asset thumbnail rendering; optional proxy/cache layer.
+- Optional catalog proxy/cache for production (rate limiting, thumbnails, moderation filters).
 - 3D pipeline: add job status polling endpoint, map Meshy states, and upload via Open Cloud to obtain `assetId`.
 - Package for Vercel and document Studio domain allowlisting.
 

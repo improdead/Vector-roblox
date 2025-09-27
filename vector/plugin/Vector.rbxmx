@@ -1,4 +1,14 @@
--- Vector Plugin — minimal chat and proposal UI
+<roblox version="4">
+  <Item class="Folder" referent="0">
+    <Properties>
+      <string name="Name">VectorPlugin</string>
+    </Properties>
+    <Item class="Script" referent="1">
+      <Properties>
+        <string name="Name">Main</string>
+        <bool name="Disabled">false</bool>
+        <token name="RunContext">3</token>
+        <string name="Source"><![CDATA[-- Vector Plugin — minimal chat and proposal UI
 -- UI patch: make composer auto-size and reflow sections
 -- - Collects context (active script + selection)
 -- - Sends to /api/chat
@@ -2584,3 +2594,1295 @@ end
 toggleButton.Click:Connect(toggleDock)
 
 return {}
+]]></string>
+      </Properties>
+    </Item>
+    <Item class="Folder" referent="2">
+      <Properties>
+        <string name="Name">net</string>
+      </Properties>
+      <Item class="ModuleScript" referent="3">
+        <Properties>
+          <string name="Name">http</string>
+          <string name="Source"><![CDATA[local HttpService = game:GetService("HttpService")
+
+local function postJson(url, body, extraHeaders)
+	local headers = { ["Content-Type"] = "application/json" }
+	if type(extraHeaders) == "table" then
+		for k, v in pairs(extraHeaders) do
+			headers[k] = v
+		end
+	end
+	return HttpService:RequestAsync({
+		Url = url,
+		Method = "POST",
+		Headers = headers,
+		Body = HttpService:JSONEncode(body),
+	})
+end
+
+local function getJson(url)
+	return HttpService:RequestAsync({
+		Url = url,
+		Method = "GET",
+		Headers = { ["Content-Type"] = "application/json" },
+	})
+end
+
+return {
+	postJson = postJson,
+	getJson = getJson,
+}
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+    <Item class="Folder" referent="4">
+      <Properties>
+        <string name="Name">tools</string>
+      </Properties>
+      <Item class="ModuleScript" referent="5">
+        <Properties>
+          <string name="Name">apply_edit</string>
+          <string name="Source"><![CDATA[local ChangeHistoryService = game:GetService("ChangeHistoryService")
+local ScriptEditorService = game:GetService("ScriptEditorService")
+
+local function isScriptClass(inst)
+    local c = inst and inst.ClassName
+    return c == "Script" or c == "LocalScript" or c == "ModuleScript"
+end
+
+-- Robust path resolver supporting game.Services and bracketed names ["Name.with.dots"]
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if typeof(path) ~= "string" or #path == 0 then return nil end
+
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local first = string.sub(s, 1, 1)
+        local last = string.sub(s, -1, -1)
+        if (first == '"' or first == "'") and last == first then
+            return string.sub(s, 2, -2)
+        end
+        return s
+    end
+
+    local tokens = {}
+    do
+        local buf = {}
+        local inBr = false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then
+                inBr = true
+            elseif ch == "]" then
+                inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf)))
+                buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+
+    local i = 1
+    if tokens[1] == "game" then i += 1 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local name = tokens[i]
+        cur = cur:FindFirstChild(name)
+        if not cur then return nil end
+        i += 1
+    end
+    return cur
+end
+
+-- line/column helpers
+local function computeLineStarts(text)
+    local starts = {1}
+    for i = 1, #text do if string.byte(text, i) == 10 then table.insert(starts, i + 1) end end
+    return starts
+end
+local function toOffset(text, line, col, lineStarts)
+    local ls = lineStarts or computeLineStarts(text)
+    local lineStart = ls[math.max(1, math.min(line, #ls))] or 1
+    return lineStart + math.max(0, (col - 1))
+end
+
+local function applyRangeEdits(old, edits)
+    local work = old
+    local ls
+    local norm = {}
+    for _, e in ipairs(edits) do
+        if e.start ~= nil and e["end"] ~= nil then
+            -- offset-based (0-based) fallback
+            local s = tonumber(e.start) or 0
+            local en = tonumber(e["end"]) or s
+            local a = s + 1
+            local b_excl = en
+            table.insert(norm, { a = a, b_excl = b_excl, text = e.text or "" })
+        elseif e.startLine and e.startCol and e.endLine and e.endCol then
+            ls = ls or computeLineStarts(work)
+            local a = toOffset(work, e.startLine, e.startCol, ls)
+            local b_excl = toOffset(work, e.endLine, e.endCol, ls) - 1
+            table.insert(norm, { a = a, b_excl = b_excl, text = e.text or "" })
+        end
+    end
+    table.sort(norm, function(p, q) return p.a > q.a end)
+    for _, e in ipairs(norm) do
+        local a = math.max(1, e.a)
+        local b_excl = math.max(a - 1, e.b_excl or (a - 1))
+        local left = string.sub(work, 1, a - 1)
+        local right = string.sub(work, (b_excl + 1))
+        work = left .. (e.text or "") .. right
+    end
+    return work
+end
+
+-- args: { script = Instance|string, edits = { __finalText? or array }, beforeHash?: string }
+return function(args)
+    local scriptOrPath = args and args.script
+    local edits = args and args.edits
+    local beforeHash = args and args.beforeHash
+
+    local target = scriptOrPath
+    if typeof(scriptOrPath) == "string" then
+        target = resolveByFullName(scriptOrPath)
+    end
+    if not target or not isScriptClass(target) then
+        return { ok = false, error = "Target is not a Script/LocalScript/ModuleScript", code = "INVALID_TARGET" }
+    end
+    if type(edits) ~= "table" then
+        return { ok = false, error = "Missing or invalid edits", code = "INVALID_EDITS" }
+    end
+
+    local conflict = false
+    local changed = false
+    local errMsg
+
+    if not ChangeHistoryService:TryBeginRecording("AI Edit", "AI Edit") then
+        return { ok = false, error = "Cannot start recording", code = "CHS_BEGIN_FAIL" }
+    end
+
+    local ok, err = pcall(function()
+        local function applyWith(old)
+            -- Conflict check at call time to avoid require-order issues
+            local sha1 = rawget(_G, "__VECTOR_SHA1")
+            if beforeHash and type(sha1) == "function" then
+                local h = sha1(old)
+                if h ~= beforeHash then
+                    conflict = true
+                    return old, false
+                end
+            end
+
+            local newText
+            if edits.__finalText and type(edits.__finalText) == "string" then
+                newText = edits.__finalText
+            else
+                newText = applyRangeEdits(old, edits)
+            end
+
+            if newText ~= old then
+                changed = true
+                return newText, true
+            else
+                return old, false
+            end
+        end
+
+        -- Prefer UpdateSourceAsync if available
+        local okAsync = pcall(function()
+            ScriptEditorService:UpdateSourceAsync(target, function(old)
+                local text, didChange = applyWith(old)
+                return text
+            end)
+        end)
+        if not okAsync then
+            -- Fallback: GetEditorSource + SetEditorSource for older Studio versions
+            local old = ScriptEditorService:GetEditorSource(target)
+            local newText, didChange = applyWith(old)
+            if didChange then
+                ScriptEditorService:SetEditorSource(target, newText)
+            end
+        end
+    end)
+
+    ChangeHistoryService:FinishRecording("AI Edit")
+
+    if not ok then errMsg = tostring(err) end
+
+    return {
+        ok = ok and not conflict and changed,
+        conflict = conflict,
+        changed = changed,
+        error = errMsg,
+        targetPath = target:GetFullName(),
+    }
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="6">
+        <Properties>
+          <string name="Name">create_instance</string>
+          <string name="Source"><![CDATA[local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if type(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
+end
+
+local function deserialize(v)
+    if type(v) ~= "table" or v.__t == nil then return v end
+    local t = v.__t
+    if t == "Vector3" then return Vector3.new(v.x or 0, v.y or 0, v.z or 0) end
+    if t == "Vector2" then return Vector2.new(v.x or 0, v.y or 0) end
+    if t == "Color3" then return Color3.new(v.r or 0, v.g or 0, v.b or 0) end
+    if t == "UDim" then
+        local s = v.s ~= nil and v.s or v.scale
+        local o = v.o ~= nil and v.o or v.offset
+        return UDim.new(s or 0, o or 0)
+    end
+    if t == "UDim2" then
+        local xS = v.xS; local xO = v.xO; local yS = v.yS; local yO = v.yO
+        if v.x and type(v.x) == "table" then xS = v.x.scale or v.x.s or xS; xO = v.x.offset or v.x.o or xO end
+        if v.y and type(v.y) == "table" then yS = v.y.scale or v.y.s or yS; yO = v.y.offset or v.y.o or yO end
+        return UDim2.new(xS or 0, xO or 0, yS or 0, yO or 0)
+    end
+    if t == "CFrame" then
+        local comps = v.comps or {}
+        if type(comps) == "table" and #comps >= 12 then
+            return CFrame.new(table.unpack(comps))
+        end
+        return CFrame.new()
+    end
+    if t == "EnumItem" then
+        local enumStr = v.enum or ""
+        local enumName = string.match(enumStr, "^Enum%.(.+)$") or enumStr
+        local name = v.name
+        local value = v.value
+        local ok, enumType = pcall(function() return Enum[enumName] end)
+        if ok and enumType then
+            if name and enumType[name] then
+                return enumType[name]
+            end
+            if value ~= nil then
+                local items = enumType:GetEnumItems()
+                for _, item in ipairs(items) do
+                    if item.Value == value then return item end
+                end
+            end
+        end
+        return nil
+    end
+    if t == "BrickColor" then
+        if v.number ~= nil then return BrickColor.new(v.number) end
+        if v.name ~= nil then return BrickColor.new(v.name) end
+        return BrickColor.White()
+    end
+    if t == "Instance" then
+        if v.path then return resolveByFullName(v.path) end
+        return nil
+    end
+    return v
+end
+
+-- Creates an instance of className under parentPath and applies optional props.
+-- Returns { ok, path?, error? }
+return function(className, parentPath, props)
+    if type(className) ~= "string" then
+        return { ok = false, error = "Missing className" }
+    end
+    local parent = resolveByFullName(parentPath)
+    if not parent then
+        return { ok = false, error = "Parent not found: " .. tostring(parentPath) }
+    end
+    local startedRecording = ChangeHistoryService:TryBeginRecording("Vector Create", "Vector Create")
+    local ok, res = pcall(function()
+        local inst = Instance.new(className)
+        if type(props) == "table" then
+            for k, v in pairs(props) do
+                if type(k) == "string" and string.sub(k,1,1) == "@" then
+                    local attr = string.sub(k,2)
+                    local dv = deserialize(v)
+                    if not (dv == nil and type(v) == "table" and v.__t == "Instance") then
+                        pcall(function() inst:SetAttribute(attr, dv) end)
+                    end
+                else
+                    pcall(function() inst[k] = deserialize(v) end)
+                end
+            end
+        end
+        inst.Parent = parent
+        return inst:GetFullName()
+    end)
+    if startedRecording then
+        ChangeHistoryService:FinishRecording("Vector Create")
+    end
+    if ok then
+        return { ok = true, path = res }
+    else
+        -- If recording was denied earlier, report a clearer message
+        if not startedRecording and tostring(res) == "Cannot start recording" then
+            return { ok = false, error = "Cannot start recording" }
+        end
+        return { ok = false, error = tostring(res) }
+    end
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="7">
+        <Properties>
+          <string name="Name">delete_instance</string>
+          <string name="Source"><![CDATA[local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if type(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
+end
+
+-- Deletes an instance. Returns { ok, error? }
+return function(path)
+    local inst = resolveByFullName(path)
+    if not inst then
+        return { ok = false, error = "Instance not found: " .. tostring(path) }
+    end
+    if not ChangeHistoryService:TryBeginRecording("Vector Delete", "Vector Delete") then
+        return { ok = false, error = "Cannot start recording" }
+    end
+    local ok, err = pcall(function()
+        inst.Parent = nil
+    end)
+    ChangeHistoryService:FinishRecording("Vector Delete")
+    return { ok = ok, error = ok and nil or tostring(err) }
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="8">
+        <Properties>
+          <string name="Name">generate_asset_3d</string>
+          <string name="Source"><![CDATA[local Http = require(script.Parent.Parent.net.http)
+local HttpService = game:GetService("HttpService")
+
+local function getBackendBaseUrl()
+    local val = plugin and plugin:GetSetting and plugin:GetSetting("vector_backend_base_url")
+    if typeof(val) == "string" and #val > 0 then
+        return (string.sub(val, -1) == "/") and string.sub(val, 1, -2) or val
+    end
+    return "http://127.0.0.1:3000"
+end
+
+-- Enqueues a 3D generation job on the backend. Returns { ok, jobId?, error? }
+return function(prompt, opts)
+    local body = { prompt = prompt, tags = opts and opts.tags or nil, style = opts and opts.style or nil, budget = opts and opts.budget or nil }
+    local base = getBackendBaseUrl()
+    local headers = {}
+    local meshyKey = plugin and plugin:GetSetting and plugin:GetSetting("vector_meshy_api_key")
+    if typeof(meshyKey) == "string" and #meshyKey > 0 then
+        headers["Authorization"] = "Bearer " .. meshyKey
+    end
+    local resp = Http.postJson(base .. "/api/assets/generate3d", body, headers)
+    if not resp.Success then
+        return { ok = false, error = "HTTP " .. tostring(resp.StatusCode) }
+    end
+    local ok, js = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+    if not ok then
+        return { ok = false, error = "Invalid JSON" }
+    end
+    return { ok = true, jobId = js.jobId }
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="9">
+        <Properties>
+          <string name="Name">get_active_script</string>
+          <string name="Source"><![CDATA[local StudioService = game:GetService("StudioService")
+local ScriptEditorService = game:GetService("ScriptEditorService")
+
+return function()
+	local s = StudioService.ActiveScript
+	if not s then
+		return { path = nil, text = nil, isDirty = false }
+	end
+	local ok, src = pcall(function()
+		return ScriptEditorService:GetEditorSource(s)
+	end)
+	return { path = s:GetFullName(), text = ok and src or "", isDirty = true }
+end
+
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="10">
+        <Properties>
+          <string name="Name">get_properties</string>
+          <string name="Source"><![CDATA[-- Resolves a Roblox Instance from a canonical GetFullName()-style path (supports bracketed tokens)
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if type(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
+end
+
+local function serialize(v)
+    local t = typeof(v)
+    if t == "string" or t == "number" or t == "boolean" then return v end
+    if t == "Instance" then
+        local ok, full = pcall(function() return v:GetFullName() end)
+        return { __t = "Instance", className = v.ClassName, name = v.Name, path = ok and full or v.Name }
+    end
+    if t == "Vector3" then return { __t = "Vector3", x = v.X, y = v.Y, z = v.Z } end
+    if t == "Vector2" then return { __t = "Vector2", x = v.X, y = v.Y } end
+    if t == "Color3" then return { __t = "Color3", r = v.R, g = v.G, b = v.B } end
+    if t == "CFrame" then return { __t = "CFrame", comps = { v:GetComponents() } } end
+    if t == "UDim2" then return { __t = "UDim2", xS = v.X.Scale, xO = v.X.Offset, yS = v.Y.Scale, yO = v.Y.Offset } end
+    if t == "UDim" then return { __t = "UDim", s = v.Scale, o = v.Offset } end
+    if t == "EnumItem" then return { __t = "EnumItem", enum = tostring(v.EnumType), name = v.Name, value = v.Value } end
+    if t == "BrickColor" then return { __t = "BrickColor", name = v.Name, number = v.Number } end
+    return tostring(v)
+end
+
+local DEFAULT_KEYS = {
+    BasePart = { "Position", "Size", "Anchored", "Transparency", "Material", "Color" },
+    Model = { "PrimaryPart", "WorldPivot" },
+}
+
+-- Returns a map of requested properties.
+-- keys: array of property names; names starting with '@' fetch attributes.
+-- opts: { includeAllAttributes?: boolean, maxBytes?: number }
+return function(path, keys, opts)
+    opts = opts or {}
+    local maxBytes = opts.maxBytes or 32*1024
+    local inst = resolveByFullName(path)
+    local out = {}
+    if not inst then return out end
+
+    local list = keys
+    if type(list) ~= "table" then
+        list = DEFAULT_KEYS[inst.ClassName] or { "Name" }
+    end
+
+    local HttpService = game:GetService("HttpService")
+    local total = 0
+    for _, key in ipairs(list) do
+        if type(key) == "string" and string.sub(key, 1, 1) == "@" then
+            local attr = string.sub(key, 2)
+            local v = inst:GetAttribute(attr)
+            if v ~= nil then
+                local sv = serialize(v)
+                out["@" .. attr] = sv
+                local ok, enc = pcall(function() return HttpService:JSONEncode(sv) end)
+                total += ok and #enc or #tostring(sv)
+            end
+        else
+            local ok, v = pcall(function() return inst[key] end)
+            if ok then
+                local sv = serialize(v)
+                out[key] = sv
+                local ok2, enc = pcall(function() return HttpService:JSONEncode(sv) end)
+                total += ok2 and #enc or #tostring(sv)
+            end
+        end
+        if total > maxBytes then break end
+    end
+
+    if opts.includeAllAttributes then
+        local attrs = inst:GetAttributes()
+        local acc = {}
+        for k, v in pairs(attrs) do
+            acc[k] = serialize(v)
+            local ok, enc = pcall(function() return HttpService:JSONEncode(acc[k]) end)
+            total += ok and #enc or #tostring(v)
+            if total > maxBytes then break end
+        end
+        out["@attributes"] = acc
+    end
+
+    return out
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="11">
+        <Properties>
+          <string name="Name">insert_asset</string>
+          <string name="Source"><![CDATA[local InsertService = game:GetService("InsertService")
+local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if typeof(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
+end
+
+return function(assetId, parent)
+    local parentInst = parent and resolveByFullName(parent) or workspace
+    if not parentInst then
+        return { ok = false, error = "Parent not found" }
+    end
+    if not ChangeHistoryService:TryBeginRecording("Vector Insert Asset", "Vector Insert Asset") then
+        return { ok = false, error = "Cannot start recording" }
+    end
+    local ok, res = pcall(function()
+        local container = InsertService:LoadAsset(assetId)
+        if not container then error("LoadAsset returned nil") end
+        local model = container:FindFirstChildOfClass("Model") or container
+        model.Parent = parentInst
+        local path = model:GetFullName()
+        -- Destroy the container if it is different from the placed model
+        if container ~= model then pcall(function() container:Destroy() end) end
+        return { ok = true, insertedPaths = { path } }
+    end)
+    ChangeHistoryService:FinishRecording("Vector Insert Asset")
+    if ok then return res else return { ok = false, error = tostring(res) } end
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="12">
+        <Properties>
+          <string name="Name">list_children</string>
+          <string name="Source"><![CDATA[-- Resolves a Roblox Instance from a canonical GetFullName()-style path (supports bracketed/quoted tokens)
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if type(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
+end
+
+-- Returns array of { className, name, path } with optional opts
+-- opts = { depth?: number (default 1), maxNodes?: number (default 200), classWhitelist?: { [ClassName]=true } }
+return function(parentPath, opts)
+    opts = opts or {}
+    local depth = opts.depth or 2
+    local maxNodes = opts.maxNodes or 200
+    local filter = opts.classWhitelist
+
+    local parent = resolveByFullName(parentPath)
+    local out = {}
+    if not parent or depth < 0 or maxNodes <= 0 then return out end
+
+    local queue = { { inst = parent, d = 0 } }
+    local seen = 0
+    local step = 0
+    while #queue > 0 do
+        local cur = table.remove(queue, 1)
+        if cur.d > 0 then
+            local inst = cur.inst
+            local ok, full = pcall(function() return inst:GetFullName() end)
+            local item = { className = inst.ClassName, name = inst.Name, path = ok and full or inst.Name }
+            if (not filter) or filter[item.className] then
+                table.insert(out, item)
+                seen += 1
+                if seen >= maxNodes then break end
+            end
+        end
+        if cur.d < depth then
+            for _, child in ipairs(cur.inst:GetChildren()) do
+                table.insert(queue, { inst = child, d = cur.d + 1 })
+            end
+        end
+        step += 1
+        if step % 200 == 0 then task.wait() end
+    end
+    return out
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="13">
+        <Properties>
+          <string name="Name">list_code_definition_names</string>
+          <string name="Source"><![CDATA[local ScriptEditorService = game:GetService("ScriptEditorService")
+
+local function clamp(n, minValue, maxValue)
+    if n < minValue then return minValue end
+    if n > maxValue then return maxValue end
+    return n
+end
+
+local function safeGetFullName(inst)
+    local ok, value = pcall(function()
+        return inst:GetFullName()
+    end)
+    if ok and type(value) == "string" then
+        return value
+    end
+    return inst.Name
+end
+
+local function safeGetSource(inst)
+    local ok, value = pcall(function()
+        if ScriptEditorService and ScriptEditorService.GetEditorSource then
+            return ScriptEditorService:GetEditorSource(inst)
+        end
+        return inst.Source
+    end)
+    if ok and type(value) == "string" then
+        return value
+    end
+    -- Final fallback to direct Source property access
+    local okSource, src = pcall(function()
+        return inst.Source
+    end)
+    if okSource and type(src) == "string" then
+        return src
+    end
+    return nil
+end
+
+local function extractDefinitions(sourceText, scriptPath, maxLines, remainingBudget, out)
+    if type(sourceText) ~= "string" or #sourceText == 0 then
+        return remainingBudget
+    end
+    local count = remainingBudget
+    local lineNumber = 0
+    for line in string.gmatch(sourceText .. "\n", "(.-)\n") do
+        lineNumber += 1
+        if lineNumber > maxLines then
+            break
+        end
+        for name in string.gmatch(line, "function%s+([%w_%.:]+)") do
+            table.insert(out, {
+                file = scriptPath,
+                line = lineNumber,
+                name = name,
+            })
+            count -= 1
+            if count <= 0 then
+                return 0
+            end
+        end
+    end
+    return count
+end
+
+return function(opts)
+    opts = opts or {}
+    local limit = clamp(tonumber(opts.limit) or 200, 1, 1000)
+    local maxScripts = clamp(tonumber(opts.maxScripts) or 300, 1, 2000)
+    local maxLines = clamp(tonumber(opts.maxLinesPerScript) or 2000, 1, 100000)
+
+    local queue = { game }
+    local head = 1
+    local tail = 1
+    local visited = { [game] = true }
+    local results = {}
+    local remaining = limit
+    local scannedScripts = 0
+
+    while head <= tail and remaining > 0 do
+        local inst = queue[head]
+        head += 1
+
+        if inst:IsA("LuaSourceContainer") then
+            scannedScripts += 1
+            if scannedScripts > maxScripts then
+                break
+            end
+            local path = safeGetFullName(inst)
+            local source = safeGetSource(inst)
+            remaining = extractDefinitions(source, path, maxLines, remaining, results)
+        end
+
+        if remaining <= 0 then
+            break
+        end
+
+        local ok, children = pcall(function()
+            return inst:GetChildren()
+        end)
+        if ok then
+            for _, child in ipairs(children) do
+                if not visited[child] then
+                    visited[child] = true
+                    tail += 1
+                    queue[tail] = child
+                end
+            end
+        end
+    end
+
+    return results
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="14">
+        <Properties>
+          <string name="Name">list_open_documents</string>
+          <string name="Source"><![CDATA[local StudioService = game:GetService("StudioService")
+local ScriptEditorService = game:GetService("ScriptEditorService")
+
+local registry = {} -- path -> { path=..., isDirty=false, lastOpened=os.clock() }
+local inited = false
+
+local function pathOf(inst)
+    if not inst then return nil end
+    local ok, full = pcall(function() return inst:GetFullName() end)
+    return ok and full or inst.Name
+end
+
+local function toScript(doc)
+    if not doc then return nil end
+    local s
+    local ok = pcall(function()
+        s = (doc.Script ~= nil) and doc.Script or (doc.GetScript and doc:GetScript())
+    end)
+    if ok then return s end
+    return nil
+end
+
+local function init()
+    if inited then return end
+    inited = true
+    -- Best-effort: connect if signals exist in this Studio version
+    pcall(function()
+        ScriptEditorService.TextDocumentDidOpen:Connect(function(doc)
+            local s = toScript(doc)
+            local p = pathOf(s)
+            if p then
+                registry[p] = { path = p, isDirty = false, lastOpened = os.clock() }
+            end
+        end)
+    end)
+    pcall(function()
+        ScriptEditorService.TextDocumentDidChange:Connect(function(doc)
+            local s = toScript(doc)
+            local p = pathOf(s)
+            if p then
+                local rec = registry[p] or { path = p, isDirty = false, lastOpened = os.clock() }
+                rec.isDirty = true
+                rec.lastOpened = os.clock()
+                registry[p] = rec
+            end
+        end)
+    end)
+    pcall(function()
+        ScriptEditorService.TextDocumentDidClose:Connect(function(doc)
+            local s = toScript(doc)
+            local p = pathOf(s)
+            if p then registry[p] = nil end
+        end)
+    end)
+end
+
+return function(maxCount)
+    init()
+    maxCount = maxCount or 20
+
+    local arr = {}
+    for _, v in pairs(registry) do table.insert(arr, v) end
+    table.sort(arr, function(a,b) return a.lastOpened > b.lastOpened end)
+    while #arr > maxCount do table.remove(arr) end
+
+    -- Ensure at least the active script is represented
+    if #arr == 0 then
+        local s = StudioService.ActiveScript
+        if s then
+            local p = pathOf(s)
+            table.insert(arr, { path = p, isDirty = true, lastOpened = os.clock() })
+        end
+    end
+    return arr
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="15">
+        <Properties>
+          <string name="Name">list_selection</string>
+          <string name="Source"><![CDATA[local Selection = game:GetService("Selection")
+
+-- Returns an array of { className, name, path }
+return function()
+    local out = {}
+    for _, inst in ipairs(Selection:Get()) do
+        table.insert(out, {
+            className = inst.ClassName,
+            name = inst.Name,
+            path = inst:GetFullName(),
+        })
+    end
+    return out
+end
+
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="16">
+        <Properties>
+          <string name="Name">rename_instance</string>
+          <string name="Source"><![CDATA[local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if type(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
+end
+
+-- Renames an instance. Returns { ok, path?, error? }
+return function(path, newName)
+    local inst = resolveByFullName(path)
+    if not inst then
+        return { ok = false, error = "Instance not found: " .. tostring(path) }
+    end
+    if type(newName) ~= "string" or #newName == 0 then
+        return { ok = false, error = "Invalid newName" }
+    end
+    if not ChangeHistoryService:TryBeginRecording("Vector Rename", "Vector Rename") then
+        return { ok = false, error = "Cannot start recording" }
+    end
+    local ok, err = pcall(function() inst.Name = newName end)
+    ChangeHistoryService:FinishRecording("Vector Rename")
+    if ok then
+        return { ok = true, path = inst:GetFullName() }
+    else
+        return { ok = false, error = tostring(err) }
+    end
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="17">
+        <Properties>
+          <string name="Name">search_assets</string>
+          <string name="Source"><![CDATA[local Http = require(script.Parent.Parent.net.http)
+local HttpService = game:GetService("HttpService")
+
+local function getBackendBaseUrl()
+    local val = plugin and plugin:GetSetting and plugin:GetSetting("vector_backend_base_url")
+    if typeof(val) == "string" and #val > 0 then
+        return (string.sub(val, -1) == "/") and string.sub(val, 1, -2) or val
+    end
+    return "http://127.0.0.1:3000"
+end
+
+-- Calls backend asset search and returns results array
+return function(query, limit)
+    local base = getBackendBaseUrl()
+    local url = string.format(
+        "%s/api/assets/search?query=%s&limit=%d",
+        base,
+        HttpService:UrlEncode(query or ""),
+        tonumber(limit) or 8
+    )
+    local resp = Http.getJson(url)
+    if not resp.Success then
+        return { ok = false, error = "HTTP " .. tostring(resp.StatusCode) }
+    end
+    local ok, js = pcall(function() return HttpService:JSONDecode(resp.Body) end)
+    if not ok then
+        return { ok = false, error = "Invalid JSON" }
+    end
+    return { ok = true, results = js.results or {} }
+end
+]]></string>
+        </Properties>
+      </Item>
+      <Item class="ModuleScript" referent="18">
+        <Properties>
+          <string name="Name">set_properties</string>
+          <string name="Source"><![CDATA[local ChangeHistoryService = game:GetService("ChangeHistoryService")
+
+local function resolveByFullName(path)
+    if typeof(path) == "Instance" then return path end
+    if type(path) ~= "string" or #path == 0 then return nil end
+    local function unquote(s)
+        if type(s) ~= "string" or #s < 2 then return s end
+        local a = string.sub(s,1,1)
+        local b = string.sub(s,-1,-1)
+        if (a == '"' or a == "'") and b == a then
+            return string.sub(s,2,-2)
+        end
+        return s
+    end
+    local tokens = {}
+    do
+        local buf, inBr = {}, false
+        for i = 1, #path do
+            local ch = string.sub(path, i, i)
+            if ch == "[" then inBr = true
+            elseif ch == "]" then inBr = false
+            elseif ch == "." and not inBr then
+                table.insert(tokens, unquote(table.concat(buf))); buf = {}
+            else
+                table.insert(buf, ch)
+            end
+        end
+        if #buf > 0 then table.insert(tokens, unquote(table.concat(buf))) end
+    end
+    local i = 1
+    if tokens[1] == "game" then i = 2 end
+    local cur
+    if tokens[i] then
+        local head = tokens[i]
+        local ok, svc = pcall(function() return game:GetService(head) end)
+        if ok and svc then cur = svc else cur = game:FindFirstChild(head) end
+        i += 1
+    else
+        cur = game
+    end
+    while cur and tokens[i] do
+        local child = cur:FindFirstChild(tokens[i])
+        if not child then return nil end
+        cur = child
+        i += 1
+    end
+    return cur
+end
+
+local function deserialize(v)
+    if type(v) ~= "table" or v.__t == nil then return v end
+    local t = v.__t
+    if t == "Vector3" then return Vector3.new(v.x or 0, v.y or 0, v.z or 0) end
+    if t == "Vector2" then return Vector2.new(v.x or 0, v.y or 0) end
+    if t == "Color3" then return Color3.new(v.r or 0, v.g or 0, v.b or 0) end
+    if t == "UDim" then
+        local s = v.s ~= nil and v.s or v.scale
+        local o = v.o ~= nil and v.o or v.offset
+        return UDim.new(s or 0, o or 0)
+    end
+    if t == "UDim2" then
+        -- Support both flat xS/xO/yS/yO and nested x/y {scale,offset}
+        local xS = v.xS; local xO = v.xO; local yS = v.yS; local yO = v.yO
+        if v.x and type(v.x) == "table" then xS = v.x.scale or v.x.s or xS; xO = v.x.offset or v.x.o or xO end
+        if v.y and type(v.y) == "table" then yS = v.y.scale or v.y.s or yS; yO = v.y.offset or v.y.o or yO end
+        return UDim2.new(xS or 0, xO or 0, yS or 0, yO or 0)
+    end
+    if t == "CFrame" then
+        local comps = v.comps or {}
+        if type(comps) == "table" and #comps >= 12 then
+            return CFrame.new(table.unpack(comps))
+        end
+        return CFrame.new()
+    end
+    if t == "EnumItem" then
+        local enumStr = v.enum or ""
+        local enumName = string.match(enumStr, "^Enum%.(.+)$") or enumStr
+        local name = v.name
+        local value = v.value
+        local ok, enumType = pcall(function() return Enum[enumName] end)
+        if ok and enumType then
+            if name and enumType[name] then
+                return enumType[name]
+            end
+            if value ~= nil then
+                local items = enumType:GetEnumItems()
+                for _, item in ipairs(items) do
+                    if item.Value == value then return item end
+                end
+            end
+        end
+        return nil
+    end
+    if t == "BrickColor" then
+        if v.number ~= nil then return BrickColor.new(v.number) end
+        if v.name ~= nil then return BrickColor.new(v.name) end
+        return BrickColor.White()
+    end
+    if t == "Instance" then
+        if v.path then return resolveByFullName(v.path) end
+        return nil
+    end
+    return v
+end
+
+-- Sets properties on an instance. Returns { ok, errors? }
+return function(path, props)
+    local inst = resolveByFullName(path)
+    if not inst then
+        return { ok = false, error = "Instance not found: " .. tostring(path) }
+    end
+    if type(props) ~= "table" then
+        return { ok = false, error = "Invalid props" }
+    end
+    if not ChangeHistoryService:TryBeginRecording("Vector Set Properties", "Vector Set Properties") then
+        return { ok = false, error = "Cannot start recording" }
+    end
+    local errors = {}
+    for k, v in pairs(props) do
+        if type(k) == "string" and string.sub(k,1,1) == "@" then
+            local attr = string.sub(k, 2)
+            local dv = deserialize(v)
+            if dv == nil and type(v) == "table" and v.__t == "Instance" then
+                table.insert(errors, { key = k, error = "Unsupported attribute type: Instance" })
+            else
+                local okSet, err = pcall(function() inst:SetAttribute(attr, dv) end)
+                if not okSet then table.insert(errors, { key = k, error = tostring(err) }) end
+            end
+        else
+            local dv = deserialize(v)
+            local okSet, err = pcall(function() inst[k] = dv end)
+            if not okSet then table.insert(errors, { key = k, error = tostring(err) }) end
+        end
+    end
+    ChangeHistoryService:FinishRecording("Vector Set Properties")
+    return { ok = #errors == 0, errors = (#errors > 0) and errors or nil }
+end
+]]></string>
+        </Properties>
+      </Item>
+    </Item>
+  </Item>
+</roblox>
