@@ -289,10 +289,10 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
 const PROMPT_SECTIONS = [
   `You are Vector, a Roblox Studio copilot.`,
   `Core rules
-- One tool per turn: emit EXACTLY ONE tool tag and nothing else. Wait for the tool result before continuing.
+- One tool per turn: emit EXACTLY ONE tool tag. It must be the last output (ignoring trailing whitespace). Wait for the tool result before continuing.
 - Proposal-first and undoable: never change code/Instances outside a tool; keep each step small and reviewable.
 - Plan when work spans multiple steps. For a single obvious action you may act without <start_plan>.
-- Keep responses tool-only (no prose, markdown, or invented tags).` ,
+- Keep responses to that single tool tag (no markdown or invented tags). Optional brief explanatory text may appear before the tag when allowed.` ,
   `Default Script Policy
 - Whenever you create, modify, or insert Instances (create_instance/set_properties/rename_instance/delete_instance/insert_asset/generate_asset_3d), you must author Luau that rebuilds the result before completing.
 - Preferred flow: open_or_create_script → show_diff (or apply_edit when already previewed). Scripts must be valid, idempotent, and set Anchored/props explicitly.
@@ -425,6 +425,15 @@ function coercePrimitive(v: string): any {
   if (t === 'false') return false
   if (t === 'null') return null
   if (!isNaN(Number(t))) return Number(t)
+  let fenceUnwrapped = t
+  if (fenceUnwrapped.startsWith('```')) {
+    fenceUnwrapped = fenceUnwrapped
+      .replace(/^```[^\n]*\n?/, '')
+      .replace(/```$/, '')
+      .trim()
+    const fenceParsed = fenceUnwrapped ? tryParseStrictJSON(fenceUnwrapped) : undefined
+    if (fenceParsed !== undefined) return fenceParsed
+  }
   // Try strict JSON first
   const jStrict = tryParseStrictJSON(t)
   if (jStrict !== undefined) return jStrict
@@ -434,8 +443,9 @@ function coercePrimitive(v: string): any {
     if (parsed !== undefined) return parsed
   }
   // JSON5-like fallback for common LLM outputs: single quotes, unquoted keys, trailing commas, fenced code
-  if ((t.startsWith('{') && t.endsWith('}')) || (t.startsWith('[') && t.endsWith(']'))) {
-    let s = t
+  const jsonishSource = fenceUnwrapped.length !== t.length ? fenceUnwrapped : t
+  if ((jsonishSource.startsWith('{') && jsonishSource.endsWith('}')) || (jsonishSource.startsWith('[') && jsonishSource.endsWith(']'))) {
+    let s = jsonishSource
     // Remove surrounding code fences/backticks if present
     s = s.replace(/^```(?:json)?/i, '').replace(/```$/i, '')
     // Replace single-quoted strings with double quotes
@@ -450,12 +460,23 @@ function coercePrimitive(v: string): any {
   return v
 }
 
-function parseToolXML(text: string): { name: string; args: Record<string, any> } | null {
+export type ParsedTool = {
+  name: string
+  args: Record<string, any>
+  prefixText: string
+  suffixText: string
+  innerRaw: string
+}
+
+export function parseToolXML(text: string): ParsedTool | null {
   if (!text) return null
-  const toolMatch = text.match(/<([a-zA-Z_][\w]*)>([\s\S]*)<\/\1>/)
+  const toolRe = /<([a-zA-Z_][\w]*)>([\s\S]*?)<\/\1>/
+  const toolMatch = toolRe.exec(text)
   if (!toolMatch) return null
   const name = toolMatch[1]
   const inner = toolMatch[2]
+  const prefixText = text.slice(0, toolMatch.index || 0)
+  const suffixText = text.slice((toolMatch.index || 0) + toolMatch[0].length)
   // parse child tags into args
   const args: Record<string, any> = {}
   const tagRe = /<([a-zA-Z_][\w]*)>([\s\S]*?)<\/\1>/g
@@ -468,9 +489,81 @@ function parseToolXML(text: string): { name: string; args: Record<string, any> }
   // If no child tags, try parsing whole inner as JSON (or JSON-like)
   if (Object.keys(args).length === 0) {
     const asJson = coercePrimitive(inner)
-    if (asJson && typeof asJson === 'object') return { name, args: asJson as any }
+    if (asJson && typeof asJson === 'object') {
+      return { name, args: asJson as any, prefixText, suffixText, innerRaw: inner }
+    }
   }
-  return { name, args }
+  return { name, args, prefixText, suffixText, innerRaw: inner }
+}
+
+function parseXmlObject(input: string): Record<string, any> | null {
+  if (typeof input !== 'string') return null
+  const s = input.trim()
+  if (!s.startsWith('<')) return null
+  const tagRe = /<([a-zA-Z_][\w]*)>([\s\S]*?)<\/\1>/g
+  const out: Record<string, any> = {}
+  let matched = false
+  let m: RegExpExecArray | null
+  while ((m = tagRe.exec(s))) {
+    matched = true
+    const key = m[1]
+    const raw = m[2]
+    const hasNested = /<([a-zA-Z_][\w]*)>/.test(raw)
+    out[key] = hasNested ? (parseXmlObject(raw) ?? coercePrimitive(raw)) : coercePrimitive(raw)
+  }
+  return matched ? out : null
+}
+
+function toClassWhitelist(raw: any): Record<string, boolean> | undefined {
+  const emit = (names: string[]): Record<string, boolean> => {
+    const out: Record<string, boolean> = {}
+    for (const n of names) {
+      const t = String(n || '').trim()
+      if (t) out[t] = true
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+  if (raw == null) return undefined
+  // If it came as a string, try JSON/CSV/space split first
+  if (typeof raw === 'string') {
+    const xmlObj = parseXmlObject(raw)
+    if (xmlObj) return toClassWhitelist(xmlObj)
+    try {
+      const parsed = JSON.parse(raw)
+      return toClassWhitelist(parsed)
+    } catch {}
+    const parts = raw
+      .split(/[\s,]+/)
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+    return emit(parts)
+  }
+  // If it is an array, interpret as list of names
+  if (Array.isArray(raw)) {
+    const names: string[] = []
+    for (const v of raw) {
+      if (typeof v === 'string') names.push(v)
+      else if (v && typeof v === 'object' && typeof (v as any).Class === 'string') names.push(String((v as any).Class))
+      else if (v && typeof v === 'object' && typeof (v as any).Name === 'string') names.push(String((v as any).Name))
+    }
+    return emit(names)
+  }
+  // If it is an object, accept direct { Class: true } or { Classes: [ ... ] }
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, any>
+    if (Array.isArray(obj.Classes)) return toClassWhitelist(obj.Classes)
+    if (typeof obj.Class === 'string') return emit([obj.Class])
+    const out: Record<string, boolean> = {}
+    for (const [k, v] of Object.entries(obj)) {
+      if (typeof v === 'boolean') out[String(k)] = !!v
+      else if (Array.isArray(v)) {
+        const nested = toClassWhitelist(v)
+        if (nested) Object.assign(out, nested)
+      }
+    }
+    return Object.keys(out).length ? out : undefined
+  }
+  return undefined
 }
 
 function toEditArray(editsRaw: any): Edit[] | null {
@@ -636,14 +729,58 @@ function mapToolToProposals(
   if (name === 'create_instance') {
     const parentPath: string | undefined = (a as any).parentPath
     if (typeof (a as any).className === 'string' && parentPath) {
-      const op: ObjectOp = { op: 'create_instance', className: (a as any).className, parentPath, props: (a as any).props }
-      proposals.push({ id: id('obj'), type: 'object_op', ops: [op], notes: 'Parsed from create_instance' })
+      const childClass = (a as any).className as string
+      const childProps = (a as any).props as Record<string, unknown> | undefined
+      const ops: ObjectOp[] = []
+
+      // Build known scene paths, with and without 'game.' prefix for services
+      const nodes = Array.isArray(input.context.scene?.nodes) ? input.context.scene!.nodes! : []
+      const known = new Set<string>()
+      const SERVICE_PREFIXES = ['Workspace','ReplicatedStorage','ServerStorage','StarterGui','StarterPack','StarterPlayer','Lighting','Teams','SoundService','TextService','CollectionService']
+      for (const n of nodes) {
+        if (!n || typeof (n as any).path !== 'string') continue
+        const p = (n as any).path as string
+        known.add(p)
+        const head = p.split('.')[0]
+        if (SERVICE_PREFIXES.includes(head)) known.add(`game.${p}`)
+      }
+
+      const looksLikeWorkspace = /^game\.Workspace(?:\.|$)/i.test(parentPath) || /^Workspace(?:\.|$)/.test(parentPath)
+      if (looksLikeWorkspace) {
+        // Walk up and create missing ancestors as Models under Workspace
+        const chain: { parent: string; name: string }[] = []
+        let cur = parentPath
+        let guard = 0
+        while (cur && !known.has(cur) && guard++ < 10) {
+          const noGame = cur.replace(/^game\./, '')
+          if (known.has(noGame)) break
+          const split = splitInstancePath(cur)
+          const inferredParent = split.parentPath || 'game.Workspace'
+          const inferredName = split.name || 'Model'
+          if (/^game\.Workspace$/i.test(inferredParent) || /^Workspace$/i.test(inferredParent)) {
+            const normalizedParent = /^Workspace$/i.test(inferredParent) ? 'game.Workspace' : inferredParent
+            chain.push({ parent: normalizedParent, name: inferredName })
+          }
+          if (!split.parentPath || /^game\.Workspace$/i.test(split.parentPath) || /^Workspace$/i.test(split.parentPath)) break
+          cur = split.parentPath
+        }
+        for (let i = chain.length - 1; i >= 0; i--) {
+          const seg = chain[i]
+          ops.push({ op: 'create_instance', className: 'Model', parentPath: seg.parent, props: { Name: seg.name } })
+          const createdPath = buildInstancePath(seg.parent.replace(/^game\./, ''), seg.name).replace(/^Workspace\./, 'Workspace.')
+          known.add(createdPath)
+          known.add(`game.${createdPath}`)
+        }
+      }
+
+      ops.push({ op: 'create_instance', className: childClass, parentPath, props: childProps })
+      proposals.push({ id: id('obj'), type: 'object_op', ops, notes: 'Parsed from create_instance' })
       if (extras?.geometryTracker) {
         extras.geometryTracker.sawCreate = true
-        extras.geometryTracker.sawParts ||= PART_CLASS_NAMES.has(op.className)
+        extras.geometryTracker.sawParts ||= PART_CLASS_NAMES.has(childClass)
       }
-      if (SCRIPT_CLASS_NAMES.has(op.className) && hasLuauSource(op.props as Record<string, unknown>)) {
-        const props = (op.props || {}) as Record<string, unknown>
+      if (SCRIPT_CLASS_NAMES.has(childClass) && hasLuauSource(childProps as Record<string, unknown>)) {
+        const props = (childProps || {}) as Record<string, unknown>
         const nameProp = typeof props['Name'] === 'string' ? String(props['Name']) : 'Script'
         const sourceText = String(props['Source'] as string)
         const targetPath = buildInstancePath(parentPath, nameProp)
@@ -1115,7 +1252,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   pushChunk(streamKey, `orchestrator.start ${startLog}`)
   console.log(`[orch] start ${startLog} msgLen=${msg.length}`)
 
-  let messages: { role: 'user' | 'assistant'; content: string }[] | null = null
+  let messages: { role: 'user' | 'assistant' | 'system'; content: string }[] | null = null
   let assetFallbackWarningSent = false
   const catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
   let scriptWarnings = 0
@@ -1153,6 +1290,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     ? (input as any).enableFallbacks
     : (process.env.VECTOR_DISABLE_FALLBACKS || '0') !== '1'
   const fallbacksDisabled = !fallbacksEnabled
+  const allowTextBeforeTool = (process.env.VECTOR_ALLOW_TEXT_BEFORE_TOOL || '0') === '1'
+  const enforceToolAtEnd = (process.env.VECTOR_ENFORCE_TOOL_AT_END || '0') === '1'
 
   while (useProvider && providerSelection && activeProvider) {
     const defaultMaxTurns = Number(process.env.VECTOR_MAX_TURNS || 4)
@@ -1277,17 +1416,72 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         continue
       }
 
+      const prefixText = (tool.prefixText || '').trim()
+      if (allowTextBeforeTool && prefixText.length > 0) {
+        pushChunk(streamKey, 'assistant.update ' + prefixText)
+      }
+
+      const suffixTextRaw = tool.suffixText || ''
+      const suffixText = suffixTextRaw.trim()
+      if (suffixText.length > 0) {
+        if (enforceToolAtEnd) {
+          const snippet = suffixText.slice(0, 160)
+          console.warn(`[orch] parse.warn trailing text after tool: ${snippet}`)
+          pushChunk(streamKey, 'warning.trailing_text ' + snippet)
+          pushChunk(streamKey, 'metric.trailing_text 1')
+        }
+        if (allowTextBeforeTool) {
+          pushChunk(streamKey, 'assistant.update ' + suffixText)
+        }
+      }
+
       const name = tool.name as keyof typeof Tools | string
+      const toolName = String(name)
       let a: Record<string, any> = tool.args || {}
-      const toolXml = toXml(String(name), a)
+
+      // Normalize arguments for common flexible encodings
+      if ((toolName === 'create_instance' || toolName === 'set_properties') && typeof (a as any).props === 'string') {
+        const parsedProps = parseXmlObject(String((a as any).props))
+        if (parsedProps && typeof parsedProps === 'object' && Object.keys(parsedProps).length > 0) {
+          a = { ...a, props: parsedProps }
+        }
+      }
+      if (toolName === 'list_children') {
+        const cwRaw = (a as any).classWhitelist
+        const cw = toClassWhitelist(cwRaw)
+        if (cw) a = { ...a, classWhitelist: cw }
+      }
+      if (toolName === 'final_message') {
+        if (!(a as any).text) {
+          const alias = (a as any).result ?? (a as any).summary
+          if (typeof alias === 'string') a = { ...a, text: alias }
+          else if (typeof tool.innerRaw === 'string' && tool.innerRaw.trim().length > 0 && !/[<][a-zA-Z_]/.test(tool.innerRaw)) {
+            a = { ...a, text: tool.innerRaw.trim() }
+          }
+        }
+      }
+      const toolXml = toXml(toolName, a)
       appendHistory('assistant', toolXml)
-      pushChunk(streamKey, `tool.parsed ${String(name)}`)
-      console.log(`[orch] tool.parsed name=${String(name)}`)
+      pushChunk(streamKey, `tool.parsed ${toolName}`)
+      console.log(`[orch] tool.parsed name=${toolName}`)
+
+      const toolSchema = (Tools as any)[toolName as any] as z.ZodTypeAny | undefined
+      if (!toolSchema) {
+        unknownToolRetries++
+        const errMsg = `Unknown tool: ${toolName}`
+        pushChunk(streamKey, `error.validation ${errMsg}`)
+        console.warn(`[orch] unknown.tool ${toolName}`)
+        convo.push({ role: 'assistant', content: toolXml })
+        const errorContent = `VALIDATION_ERROR ${toolName}\n${errMsg}`
+        convo.push({ role: 'user', content: errorContent })
+        appendHistory('system', errorContent)
+        if (unknownToolRetries > unknownToolRetryLimit) break
+        continue
+      }
 
       const planReady = Array.isArray(taskState.plan?.steps) && (taskState.plan?.steps.length || 0) > 0
       const askMode = (input.mode || 'agent') === 'ask'
       const requirePlan = (process.env.VECTOR_REQUIRE_PLAN || '0') === '1'
-      const toolName = String(name)
       const isContextOrNonActionTool = (
         toolName === 'start_plan' ||
         toolName === 'update_plan' ||
@@ -1344,9 +1538,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         a = { ...a, parentPath: selIsContainer ? selPath! : 'game.Workspace' }
       }
 
-      const schema = (Tools as any)[name as any] as z.ZodTypeAny | undefined
-      if (schema) {
-        const parsed = schema.safeParse(a)
+      if (toolSchema) {
+        const parsed = toolSchema.safeParse(a)
         if (!parsed.success) {
           consecutiveValidationErrors++
           const errMsg = parsed.error?.errors?.map((e) => `${e.path.join('.')}: ${e.message}`).join('; ') || 'invalid arguments'

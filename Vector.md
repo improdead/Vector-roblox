@@ -11,13 +11,31 @@
 * **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval. Streaming includes clear indicators: `orchestrator.start …`, `tool.parsed <name>`, `tool.valid <name>`, `tool.result <name>`, `proposals.mapped <name> count=N`, `context.request <reason>`, and `error.*`. The web console now also prints `[orch] provider.raw …` so every raw model reply is visible for debugging.
   - Ask mode UI: a single transcript shows assistant text bubbles and compact tool chips. Completion proposals are echoed as assistant text; in Auto mode proposals auto-apply and render as chips only.
 
-### November 2026 Notes
+### Recent Implementation Notes
 
 Recent prompt and orchestrator changes aim to make *geometry-first* scene building smoother:
 
 - The system prompt now nudges the model to plan before acting, list current instances, and iterate with `create_instance`/`set_properties` until visible results exist. Examples are illustrative only; they do not enforce specific content. The agent chooses relevant patterns (e.g., house) and must not introduce unrelated models (e.g., "Farm") unless explicitly requested.
 - Geometry intent is detected heuristically, but we no longer hard-block scripting; the prompt + example policy keeps the agent in direct manipulation mode unless the user explicitly requests reusable Luau.
 - Raw provider payloads are logged to the terminal via `[orch] provider.raw …`, which helps spot malformed XML/JSON immediately during runs.
+- Tool results are now re‑fed to the model as `user` messages (not `system`), so the provider “remembers” context tool outputs (e.g., list_children) and stops claiming the workspace is empty. Paths: apps/web/lib/orchestrator/index.ts:1531, 1553.
+- XML props tolerance: the orchestrator accepts `<props><Name>…</Name></props>` (nested tags) in addition to strict JSON. These are converted into an object before schema validation. Path: apps/web/lib/orchestrator/index.ts:498.
+- Fenced JSON tolerance: ```json blocks are unwrapped before parsing so edits/arrays parse reliably. Path: apps/web/lib/orchestrator/index.ts:430–460.
+- Auto‑create missing parents: when the model asks to create an Instance under `Workspace.<Name>` and that parent path doesn’t exist yet in the snapshot, the orchestrator automatically prepends a `create_instance(Model)` for the missing ancestor(s) under `game.Workspace` before the requested child. This enables prompts like “Create WallNorth under Workspace.Base …” in a single step, without manual selection. Path: apps/web/lib/orchestrator/index.ts around the `create_instance` mapping.
+  - Scope: only under Workspace; creates a chain of missing Models (e.g., Workspace.Base.Structures → creates Base, then Structures, then your child).
+  - Selection defaults still apply when no `parentPath` is provided.
+- Optional text‑before‑tool: you may enable `VECTOR_ALLOW_TEXT_BEFORE_TOOL=1` to surface brief assistant prose before the single tool tag; set `VECTOR_ENFORCE_TOOL_AT_END=1` to warn on trailing prose after the tag.
+
+### Plugin UI fixes
+
+- Tooltip helper hoisted; nil call removed. The auto‑toggle tooltip no longer throws on hover. File: plugin/src/main.server.lua around 1316–1396.
+- Proposal card guards: accessing `.Visible` is now guarded for potentially missing controls in the completion branch to avoid nil errors in renderProposals.
+
+### Asset search/insert
+
+- `GET /api/assets/search` is wired and defaults to Roblox catalog unless `CATALOG_API_URL` is set to a proxy. Results are normalized to `{ id, name, creator, type, thumbnailUrl }`. Paths: apps/web/app/api/assets/search/route.ts, apps/web/lib/catalog/search.ts.
+- The plugin renders a result picker with Insert buttons that call `InsertService:LoadAsset(assetId)` and report back via `/api/proposals/:id/apply`.
+
 
 ---
 

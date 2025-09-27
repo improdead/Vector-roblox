@@ -1315,11 +1315,8 @@ local function buildUI(gui)
     local showTween, hideTween
     local isTooltipVisible = false
     local hideConnection = nil
-    autoToggleBtn.MouseEnter:Connect(function()
-        -- Cancel any ongoing hide animation
-        if hideTween then hideTween:Cancel() end
 
-        -- Set initial transparent state for animation
+    -- Compute an on-screen position for the tooltip (above the button, clamped)
     local function positionTooltipWithinViewport()
         local buttonPos = autoToggleBtn.AbsolutePosition
         local buttonSize = autoToggleBtn.AbsoluteSize
@@ -1364,7 +1361,7 @@ local function buildUI(gui)
             hideConnection = nil
         end
     end
-    end)
+
     
     autoToggleBtn.MouseEnter:Connect(function()
         -- Set initial transparent state for animation
@@ -1842,9 +1839,9 @@ local function renderProposals(list, proposals)
 					if ok then ui.addStatus("checkpoint.create ok " .. tostring(checkpoint.id)) end
 				end
 			end)
-			reject.Visible = false
-			if diffBtn then diffBtn.Visible = false end
-			if approveOpen then approveOpen.Visible = false end
+        if reject then reject.Visible = false end
+        if diffBtn then diffBtn.Visible = false end
+        if approveOpen then approveOpen.Visible = false end
 		elseif p.type == "edit" then
 			approveOpen = Instance.new("TextButton")
 			approveOpen.Text = "Apply & Open"

@@ -19,6 +19,20 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - Geometry intent still flips the opt-out flag, but script tools are no longer hard-blocked; behaviour now relies on prompt guidance instead of runtime enforcement.
 - Raw provider logging (November 2026):
   - Every LLM reply is printed via `[orch] provider.raw …` for easier debugging of malformed XML/JSON payloads.
+- Tool result message role (Dec 2026):
+  - Tool results are now echoed back into the provider conversation as `user` messages (instead of `system`). This fixes models ignoring prior context tool outputs (e.g., `list_children`) and prematurely claiming the workspace is empty.
+  - Paths: `apps/web/lib/orchestrator/index.ts:1531, 1553`.
+- Parser robustness (Dec 2026):
+  - `coercePrimitive` unwraps ```json fenced blocks and escapes bare newlines inside JSON strings before parsing.
+  - `parseToolXML` returns `{ name, args, prefixText, suffixText }`, enabling optional “text before tool” streaming in the UI.
+  - Added a tiny `parseXmlObject` to accept XML‑ish `<props><Name>Foo</Name></props>` emitted by some models.
+  - Env flags: `VECTOR_ALLOW_TEXT_BEFORE_TOOL=1`, `VECTOR_ENFORCE_TOOL_AT_END=1`.
+- Auto‑create missing parents (Dec 2026):
+  - When a tool requests `create_instance` under `Workspace.<Name>` and that parent path doesn’t exist in the scene snapshot, the orchestrator prepends one or more `create_instance(Model)` ops under `game.Workspace` to construct the missing chain, then appends the requested child op. This removes the need to manually select the parent.
+  - Scope: limited to Workspace descendants; safe and deterministic.
+  - Path: `apps/web/lib/orchestrator/index.ts` in the `create_instance` mapping.
+- Plugin UI fixes (Dec 2026):
+  - Tooltip helper hoisted; removed nil call on hover. Guarded `.Visible` toggles on completion cards to avoid rare nils in `renderProposals`.
 - Default script policy tracking (October 2026):
   - System prompt outlines the policy explicitly and trims legacy examples so guidance is concise.
 - Orchestrator tracks geometry/object ops vs Luau edits per workflow and respects user opt-outs. Attempts to finish after geometry-only work now surface `SCRIPT_REQUIRED` validation errors until matching Luau edits land, so the guard is actively enforced.
@@ -215,6 +229,8 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 - Asset Catalog integration
   - Direct Roblox catalog search with thumbnail lookups when `CATALOG_API_URL` is unset; proxy/caching still optional.
   - `vector/apps/web/lib/catalog/search.ts:1`
+  - Insert is user‑driven: the plugin shows a search result list with per‑item “Insert” buttons; clicking triggers `InsertService:LoadAsset(assetId)` then reports `/api/proposals/:id/apply`.
+  - The agent will prefer manual geometry unless prompted to use catalog (by design of the current prompt).
 
 - Tool module integration (plugin)
   - Decision: Fully dispatch through `src/tools/*.lua`.
@@ -233,6 +249,10 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 
 - Advanced chat shortcuts
   - Quick menu covers Retry/Next, but there are still no dedicated buttons for one-click “Ask” prompts, context presets, or slash-command menus.
+
+- Agent‑driven Studio selection
+  - There is no tool to change Studio selection from the orchestrator. Selection is read‑only context captured by the plugin and used for sensible defaults.
+  - If needed, we can add a new tool and proposal op (e.g., `set_selection(paths[])`) plus a minimal plugin handler to set `Selection` and optionally focus the camera. This is optional given the new auto‑create behavior.
 
 - Conversation summarization & guardrails
   - Context auto-request and history trimming are in place, but full summarization, guardrail prompts, and cross-run memory limits remain TODO.
