@@ -289,12 +289,11 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
 const PROMPT_SECTIONS = [
   `You are Vector, a Roblox Studio copilot.`,
   `Core rules
+- Always call a tool; do not respond with plain text only. If no further tool is needed, finish with <complete>.
 - One tool per turn: emit EXACTLY ONE tool tag. It must be the last output (ignoring trailing whitespace). Wait for the tool result before continuing.
 - Proposal-first and undoable: never change code/Instances outside a tool; keep each step small and reviewable.
 - Plan when work spans multiple steps. For a single obvious action you may act without <start_plan>.
 - Keep responses to that single tool tag (no markdown or invented tags). Optional brief explanatory text may appear before the tag when allowed.` ,
-  `Planning details
-- For non-trivial tasks, your <start_plan> MUST list detailed, tool-specific steps (8–15 typical): include the tool name, exact target (class/path/name), and the intended outcome. Example: "Create Model 'Base' under game.Workspace", "Search assets query='barracks'", "Insert asset 12345 under game.Workspace.Base", "Set CFrame for 'Gate' to (0,0,50)", "Open or create Script 'BaseBuilder'", "Show diff to add idempotent Luau".`,
   `Default Script Policy
 - Whenever you create, modify, or insert Instances (create_instance/set_properties/rename_instance/delete_instance/insert_asset/generate_asset_3d), you must author Luau that rebuilds the result before completing.
 - Preferred flow: open_or_create_script → show_diff (or apply_edit when already previewed). Scripts must be valid, idempotent, and set Anchored/props explicitly.
@@ -313,8 +312,11 @@ const PROMPT_SECTIONS = [
 - Attributes use "@Name" keys.
 - Edits are 0-based, non-overlapping, ≤20 edits and ≤2000 inserted chars.`,
   `Assets & 3D
-  - Prefer search_assets → insert_asset for props/models. Use create_instance only for simple primitive geometry or when catalog search fails/disabled.
-  - search_assets limit ≤ 6 unless the user asks. Include helpful tags.
+  - Default flow for placing named objects or common props: search-first, then insert.
+    1) <search_assets><query>…</query><limit>≤6</limit></search_assets>
+    2) Choose one result and call <insert_asset> with its assetId; include parentPath (use selection container if present, else game.Workspace).
+  - Only fall back to manual geometry (create_instance/set_properties or Luau) when the catalog search returns 0 suitable results or the user explicitly requests custom geometry.
+  - Keep search_assets limit ≤ 6 unless the user asks. Include helpful tags when known.
   - insert_asset defaults parentPath to game.Workspace if unknown.`,
   `Scene building
   - Always think through the layout before acting: use <start_plan> to outline the main structures, then execute steps one tool at a time.
@@ -329,37 +331,8 @@ const PROMPT_SECTIONS = [
 - On VALIDATION_ERROR, retry the SAME tool once with corrected args (no commentary or tool switching).
 - If you would otherwise reply with no tool, either choose exactly one tool or finish with <complete>.`,
 String.raw`Quick examples
-Detailed plan (assets-first)
 <start_plan>
-  <steps>[
-    "Create Model 'MilitaryBase' under game.Workspace",
-    "Search assets query='watch tower' tags=['model'] limit=6",
-    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
-    "Search assets query='barracks' tags=['model'] limit=6",
-    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
-    "Search assets query='fence' tags=['model'] limit=6",
-    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
-    "Set properties (Anchored, CFrame) to arrange towers, barracks, fence perimeter",
-    "Open or create Script 'BaseBuilder' in game.ServerScriptService",
-    "Show diff to add idempotent Luau that rebuilds the base"
-  ]</steps>
-</start_plan>
-
-Insert an asset (preferred)
-<search_assets>
-  <query>oak tree</query>
-  <tags>["tree","nature"]</tags>
-  <limit>6</limit>
-</search_assets>
-
-<insert_asset>
-  <assetId>123456789</assetId>
-  <parentPath>game.Workspace</parentPath>
-</insert_asset>
-
-Build simple geometry
-<start_plan>
-  <steps>["Create 'House' model under Workspace","Create 'Floor' Part with size 16x1x16 at y=0.5 Anchored","Create 'WallFront' Part 16x8x1 at z=-7.5 Anchored","Create 'Roof' Part 16x1x16 with slight tilt Anchored"]</steps>
+  <steps>["Check existing selection","Create 'House' shell","Add floor and walls","Add roof","Detail interior or exit"]</steps>
 </start_plan>
 
 <create_instance>
@@ -546,7 +519,7 @@ function parseXmlObject(input: string): Record<string, any> | null {
 }
 
 function toClassWhitelist(raw: any): Record<string, boolean> | undefined {
-  const emit = (names: string[]): Record<string, boolean> => {
+  const emit = (names: string[]): Record<string, boolean> | undefined => {
     const out: Record<string, boolean> = {}
     for (const n of names) {
       const t = String(n || '').trim()
@@ -593,6 +566,29 @@ function toClassWhitelist(raw: any): Record<string, boolean> | undefined {
       }
     }
     return Object.keys(out).length ? out : undefined
+  }
+  return undefined
+}
+
+export function __deriveAssetSearchQuery(
+  className: string,
+  props?: Record<string, unknown>,
+  message?: string,
+): string | undefined {
+  const cls = String(className || '').trim()
+  const name = typeof (props as any)?.Name === 'string' ? String((props as any).Name).trim() : ''
+  if (SCRIPT_CLASS_NAMES.has(cls)) return undefined
+  const generic = /^(?:model|part|basepart)$/i
+  if (name && !generic.test(name)) {
+    if (/\s/.test(name) || !/^(model|part|basepart)$/i.test(name)) return name
+  }
+  const msg = (message || '').trim()
+  if (msg.length > 0) {
+    const m = msg.match(/\b(?:add|make|place|insert|create|put|spawn)\b\s+(.{3,40}?)(?:[.!?]|$)/i)
+    if (m && m[1]) {
+      const term = m[1].replace(/[^A-Za-z0-9\-\s]/g, '').trim()
+      if (term.length >= 3) return term
+    }
   }
   return undefined
 }
@@ -763,6 +759,7 @@ function mapToolToProposals(
       const childClass = (a as any).className as string
       const childProps = (a as any).props as Record<string, unknown> | undefined
       const ops: ObjectOp[] = []
+
 
       // Build known scene paths, with and without 'game.' prefix for services
       const nodes = Array.isArray(input.context.scene?.nodes) ? input.context.scene!.nodes! : []
@@ -1000,6 +997,11 @@ function mapToolToProposals(
   return { proposals }
 }
 
+// Test helper: expose the mapping logic for unit tests without invoking providers
+export function __test_mapTool(name: string, args: Record<string, any>, input: ChatInput, msg: string) {
+  return mapToolToProposals(String(name), args || {}, input, msg)
+}
+
 function proposalTouchesLuau(proposal: Proposal): boolean {
   if (!proposal) return false
   if (proposal.type === 'edit') {
@@ -1095,6 +1097,7 @@ function proposalTouchesGeometry(proposal: Proposal): boolean {
   }
   return false
 }
+
 
 export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[]; taskState: TaskState }> {
   const rawMessage = input.message.trim()

@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "eslint . --ext .ts,.tsx --max-warnings=0",
-    "test:orchestrator": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node lib/orchestrator/index.test.ts"
+    "test:orchestrator": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node lib/orchestrator/index.test.ts && TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node lib/orchestrator/index.assetFlow.test.ts"
   },
   "dependencies": {
     "adm-zip": "^0.5.12",
