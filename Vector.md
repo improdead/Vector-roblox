@@ -26,6 +26,12 @@ Recent prompt and orchestrator changes aim to make *geometry-first* scene buildi
   - Selection defaults still apply when no `parentPath` is provided.
 - Optional text‑before‑tool: you may enable `VECTOR_ALLOW_TEXT_BEFORE_TOOL=1` to surface brief assistant prose before the single tool tag; set `VECTOR_ENFORCE_TOOL_AT_END=1` to warn on trailing prose after the tag.
 
+Planning updates (detailed, tool‑oriented)
+- The planner now expects a detailed, tool‑specific step list when work is non‑trivial. Steps should name the tool, the exact target (class/path/name), and the intention (e.g., position/size or script action).
+- Typical plans are 8–15 steps, but there is no hard cap — the agent may use as many steps as needed to be clear and verifiable.
+- Prefer assets first: plan search_assets → insert_asset for props/models, then arrange via set_properties; fall back to create_instance when catalog search is unavailable or insufficient.
+- A Luau step is still required before completion (unless user opts out, e.g., “geometry only”).
+
 ### Plugin UI fixes
 
 - Tooltip helper hoisted; nil call removed. The auto‑toggle tooltip no longer throws on hover. File: plugin/src/main.server.lua around 1316–1396.
@@ -35,6 +41,36 @@ Recent prompt and orchestrator changes aim to make *geometry-first* scene buildi
 
 - `GET /api/assets/search` is wired and defaults to Roblox catalog unless `CATALOG_API_URL` is set to a proxy. Results are normalized to `{ id, name, creator, type, thumbnailUrl }`. Paths: apps/web/app/api/assets/search/route.ts, apps/web/lib/catalog/search.ts.
 - The plugin renders a result picker with Insert buttons that call `InsertService:LoadAsset(assetId)` and report back via `/api/proposals/:id/apply`.
+ - Orchestrator bias: prefers `search_assets` → `insert_asset` over manual `create_instance` for non‑primitive content; will pivot to manual creation when `CATALOG_DISABLE_SEARCH=1`, no results, or insert errors are reported.
+ - Fallback signals:
+   - Server apply route records a system hint encouraging manual creation on asset failures.
+   - Plugin auto‑continue appends a follow‑up message to build manually if insert failed (includes last error).
+
+### Planning guidance (assets‑first, detailed)
+
+Use a detailed <start_plan> with one tool per step, naming the action and target. Example (military base outline):
+
+```
+<start_plan>
+  <steps>[
+    "Create Model 'MilitaryBase' under game.Workspace",
+    "Search assets query='watch tower' tags=['model'] limit=6",
+    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
+    "Search assets query='barracks' tags=['model'] limit=6",
+    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
+    "Search assets query='fence' tags=['model'] limit=6",
+    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
+    "Set properties (Anchored, CFrame) to arrange towers, barracks, fence perimeter",
+    "Open or create Script 'BaseBuilder' in game.ServerScriptService",
+    "Show diff to add idempotent Luau that rebuilds the base"
+  ]</steps>
+</start_plan>
+```
+
+Notes
+- Not capped: include as many steps as needed to place/arrange everything clearly.
+- After inserts, use `set_properties` to anchor and position visible parts so progress is obvious in Workspace.
+- If search/insert fails: continue with `create_instance` and place primitives, then add Luau before completing (unless opted out).
 
 
 ---

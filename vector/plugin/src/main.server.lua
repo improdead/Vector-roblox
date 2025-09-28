@@ -2267,6 +2267,7 @@ local function toggleDock()
 					ui.addStatus("auto.insert asset " .. tostring(assetId))
 					local ok, modelOrErr = insertAsset(assetId, p.insert.parentPath)
 					if ok then
+						_G.__VECTOR_LAST_ASSET_ERROR = nil
 						local insertedPath = nil
 						if modelOrErr and typeof(modelOrErr) == "Instance" and modelOrErr.GetFullName then
 							local success, value = pcall(function() return modelOrErr:GetFullName() end)
@@ -2276,12 +2277,14 @@ local function toggleDock()
 						reportApply(p.id, { ok = true, type = p.type, op = "insert_asset", assetId = assetId, insertedPath = insertedPath })
 					else
 						local errMsg = tostring(modelOrErr)
+						_G.__VECTOR_LAST_ASSET_ERROR = errMsg or "insert_failed"
 						ui.addStatus("auto.err asset " .. errMsg)
 						reportApply(p.id, { ok = false, type = p.type, op = "insert_asset", assetId = assetId, error = errMsg })
 					end
 					return ok
 				else
 					ui.addStatus("auto.err asset invalid id")
+					_G.__VECTOR_LAST_ASSET_ERROR = "invalid_asset_id"
 					reportApply(p.id, { ok = false, type = p.type, op = "insert_asset", error = "invalid_asset_id" })
 				end
 			elseif p.search then
@@ -2298,6 +2301,7 @@ local function toggleDock()
 								ensurePermissionWithStatus()
 								local okInsert, modelOrErr = insertAsset(assetId, nil)
 								if okInsert then
+									_G.__VECTOR_LAST_ASSET_ERROR = nil
 									local insertedPath = nil
 									if modelOrErr and typeof(modelOrErr) == "Instance" and modelOrErr.GetFullName then
 										local success, value = pcall(function() return modelOrErr:GetFullName() end)
@@ -2308,19 +2312,23 @@ local function toggleDock()
 									return true
 								else
 									local errMsg = tostring(modelOrErr)
+									_G.__VECTOR_LAST_ASSET_ERROR = errMsg or "insert_failed"
 									ui.addStatus("auto.err asset " .. errMsg)
 									reportApply(p.id, { ok = false, type = p.type, op = "search_insert", assetId = assetId, query = query, error = errMsg })
 								end
 							else
 								ui.addStatus("auto.err asset invalid id")
+								_G.__VECTOR_LAST_ASSET_ERROR = "invalid_asset_id"
 								reportApply(p.id, { ok = false, type = p.type, op = "search_insert", query = query, error = "invalid_asset_id" })
 							end
 						else
 							ui.addStatus("auto.asset_search none")
+							_G.__VECTOR_LAST_ASSET_ERROR = "no_results"
 							reportApply(p.id, { ok = false, type = p.type, op = "search", query = query, error = "no_results" })
 						end
 					else
 						local errMsg = typeof(resultsOrErr) == "string" and resultsOrErr or "fetch_failed"
+						_G.__VECTOR_LAST_ASSET_ERROR = errMsg or "fetch_failed"
 						ui.addStatus("auto.asset_search error " .. errMsg)
 						reportApply(p.id, { ok = false, type = p.type, op = "search", query = query, error = errMsg })
 					end
@@ -2337,7 +2345,7 @@ local function toggleDock()
 		return false
 	end
 
-	local function maybeAutoContinue(workflowId)
+local function maybeAutoContinue(workflowId)
 		if not _G.__VECTOR_AUTO then return end
 		local maxSteps = 6
 		local steps = 0
@@ -2346,6 +2354,10 @@ local function toggleDock()
 				steps += 1
 				ui.addStatus("auto.next step " .. tostring(steps))
 				local followup = "Next step: propose exactly one small, safe action."
+				if _G.__VECTOR_LAST_ASSET_ERROR then
+					followup = followup .. " Asset search/insert failed (" .. tostring(_G.__VECTOR_LAST_ASSET_ERROR) .. "). Please build manually using create_instance/set_properties, or write Luau to rebuild the scene."
+					_G.__VECTOR_LAST_ASSET_ERROR = nil
+				end
 				local mode = CURRENT_MODE
 				local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = getModelOverride(), autoApply = _G.__VECTOR_AUTO }
 				local resp = sendChat("local", followup, buildContextSnapshot(), workflowId, opts)

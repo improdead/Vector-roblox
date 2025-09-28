@@ -35,6 +35,22 @@ export async function POST(req: Request, ctx: { params: { id: string } }) {
       maybeQueueCheckpoint(after.workflowId, after)
     }
   } catch {}
+  // If an asset operation failed, record a hint to fallback to manual creation
+  try {
+    const wf = after?.workflowId
+    const isAsset = typeof (body as any)?.type === 'string' && (body as any).type === 'asset_op'
+    const opKind = typeof (body as any)?.op === 'string' ? String((body as any).op) : undefined
+    const failed = (body as any)?.ok === false
+    if (wf && isAsset && failed) {
+      const fallback = 'CATALOG_UNAVAILABLE Asset search/insert failed. Create the requested objects manually using create_instance/set_properties or Luau edits.'
+      try { pushChunk(wf, 'fallback.asset manual_required') } catch (e) { console.error('Failed to push chunk for asset fallback', e) }
+      updateTaskState(wf, (state) => {
+        state.history.push({ role: 'system', content: fallback + (opKind ? ` op=${opKind}` : ''), at: Date.now() })
+      })
+    }
+  } catch (e) {
+    console.error('Failed to record asset operation fallback hint', e)
+  }
   const op = typeof body?.op === 'string' ? body.op : undefined
   if (op === 'create_instance') {
     const className = typeof body.className === 'string' ? body.className : 'Instance'
