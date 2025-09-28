@@ -2356,6 +2356,7 @@ local function maybeAutoContinue(workflowId)
 				local followup = "Next step: propose exactly one small, safe action."
 				if _G.__VECTOR_LAST_ASSET_ERROR then
 					followup = followup .. " Asset search/insert failed (" .. tostring(_G.__VECTOR_LAST_ASSET_ERROR) .. "). Please build manually using create_instance/set_properties, or write Luau to rebuild the scene."
+					_G.__VECTOR_LAST_ASSET_ERROR = nil
 				end
 				local mode = CURRENT_MODE
 				local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = getModelOverride(), autoApply = _G.__VECTOR_AUTO }
