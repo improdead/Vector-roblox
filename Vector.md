@@ -7,8 +7,8 @@
 ## 0) What this is
 
 * **Studio Plugin (Luau)**: docked chat + proposals, reads active editor state, previews diffs, applies edits inside **ChangeHistoryService**. Provider configuration is read from the backend `.env`.
-* **Next.js Backend (TypeScript)**: `/api/chat`, `/api/stream`, `/api/proposals/:id/apply`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM.
-* **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval. Streaming includes clear indicators: `orchestrator.start …`, `tool.parsed <name>`, `tool.valid <name>`, `tool.result <name>`, `proposals.mapped <name> count=N`, `context.request <reason>`, and `error.*`. The web console now also prints `[orch] provider.raw …` so every raw model reply is visible for debugging.
+* **Next.js Backend (TypeScript)**: `/api/chat`, `/api/stream`, `/api/proposals/:id/apply`, `/api/assets/search`, plus an orchestrator that exposes tools to the LLM across OpenRouter, Gemini, AWS Bedrock, and NVIDIA providers.
+* **LLM Tool‑Calling**: one‑tool‑per‑message, approval‑first workflow (like Cline). The model proposes **proposals** (edits/object ops/asset ops); only the plugin performs writes after user approval. Supports provider selection among OpenRouter, Gemini, AWS Bedrock (Claude / Titan / Llama variants), and NVIDIA (NIM / OpenAI-compatible endpoints). Streaming includes clear indicators: `orchestrator.start …`, `tool.parsed <name>`, `tool.valid <name>`, `tool.result <name>`, `proposals.mapped <name> count=N`, `context.request <reason>`, and `error.*`. The console prints `[orch] provider.raw …` for every raw reply.
   - Ask mode UI: a single transcript shows assistant text bubbles and compact tool chips. Completion proposals are echoed as assistant text; in Auto mode proposals auto-apply and render as chips only.
 
 ### Recent Implementation Notes
@@ -1059,7 +1059,7 @@ vector/
 
 Recent updates
 
-- 2026-07: Hardened provider selection — deterministic chooser between OpenRouter and Gemini (`VECTOR_DEFAULT_PROVIDER`, override precedence, env fallbacks), Gemini client safety checks (empty/safety finishes fail fast), sanitized catalog logging, and prompt guidance for manual scene creation when catalog search stubs out.
+- 2026-07: Hardened provider selection — deterministic chooser between OpenRouter, Gemini, AWS Bedrock, and NVIDIA (`VECTOR_DEFAULT_PROVIDER`, override precedence, env fallbacks). Added Bedrock adapter (InvokeModel) & NVIDIA adapter (OpenAI-compatible). Gemini client safety checks (empty/safety finishes fail fast), sanitized catalog logging, and prompt guidance for manual scene creation when catalog search stubs out.
 - 2026-07: Shipped checkpoint snapshots/restore, diff3-powered multi-file apply + conflict hunks, and the TaskState-driven progress UI (per-message auto checkpoints, manual Snapshot/Restore buttons in the plugin, run badges, token telemetry, and streamed conflict previews).
 - 2026-06: Composer UI rebuilt to match reference mockup (attachment chips, inline auto toggle, model selector, quick menu) and auto mode now auto-inserts catalog assets.
 - 2026-06: Model override pipeline added (`modelOverride` from plugin → API → orchestrator) with Gemini 2.5 Flash option in the Studio UI.
@@ -1084,7 +1084,7 @@ Next focus (July 2026)
 Decisions captured
 
 - AI name: Vector (assistant name in UI and comments)
-- LLM providers: OpenRouter (default) with optional direct Gemini integration; `VECTOR_DEFAULT_PROVIDER`, plugin overrides, and env keys decide which client runs each request.
+- LLM providers: OpenRouter (default), Gemini, AWS Bedrock, NVIDIA. `VECTOR_DEFAULT_PROVIDER`, plugin overrides, and env keys decide which client runs each request; unavailable creds automatically skip a provider.
 - Package manager: npm
 - Hosting: Local dev at http://127.0.0.1:3000 for now. We will move to Vercel (or similar) later.
 - Domain permissions: local-only for now; will add hosted domain later when deploying.
@@ -1120,21 +1120,33 @@ Working now
 
 ## Local Provider Settings (via backend .env)
 
-- Configure provider credentials in `vector/apps/web/.env.local` instead of Studio settings.
-- Example `.env.local` (already added):
-  - `OPENROUTER_API_KEY=` (leave blank to use fallbacks)
+- Configure provider credentials in `vector/apps/web/.env.local` instead of Studio settings. Add only those you need:
+  OpenRouter:
+  - `OPENROUTER_API_KEY=`
   - `OPENROUTER_MODEL=moonshotai/kimi-k2:free`
-  - `VECTOR_USE_OPENROUTER=0` (set to `1` to enable provider)
-  - `VECTOR_DEFAULT_PROVIDER=openrouter` (choose `openrouter` or `gemini` when no override is supplied)
-  - `OPENROUTER_MAX_RETRIES=3` (optional retry count; default 3)
-  - `OPENROUTER_RETRY_DELAY_MS=1000` (initial backoff in ms; default 1000)
-  - `OPENROUTER_RETRY_MAX_MS=10000` (max backoff cap in ms; default 10000)
-  - `GEMINI_API_KEY=` (optional; required for direct Gemini calls)
+  - `VECTOR_USE_OPENROUTER=0`
+  Gemini:
+  - `GEMINI_API_KEY=`
   - `GEMINI_MODEL=gemini-2.5-flash`
-  - `GEMINI_API_BASE_URL=` (optional proxy endpoint)
+  - `GEMINI_API_BASE_URL=` (optional)
   - `GEMINI_TIMEOUT_MS=30000`
-  - `VECTOR_WORKSPACE_ROOT=` (optional absolute path override for `@file/@folder` and search tools)
-  - `VECTOR_PROBLEMS_FILE=` (optional absolute/relative path for `@problems` mention; defaults to `<root>/problems.log`)
+  AWS Bedrock:
+  - `BEDROCK_REGION=us-east-1`
+  - `BEDROCK_MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0`
+  - `AWS_ACCESS_KEY_ID=` (omit if using instance/role creds)
+  - `AWS_SECRET_ACCESS_KEY=`
+  - `AWS_SESSION_TOKEN=` (optional)
+  NVIDIA:
+  - `NVIDIA_API_KEY=`
+  - `NVIDIA_MODEL=llama-3.1-70b-instruct`
+  - `NVIDIA_API_BASE_URL=` (optional OpenAI-compatible base)
+  Shared:
+  - `VECTOR_DEFAULT_PROVIDER=openrouter` (or `gemini|bedrock|nvidia`)
+  - `OPENROUTER_MAX_RETRIES=3`
+  - `OPENROUTER_RETRY_DELAY_MS=1000`
+  - `OPENROUTER_RETRY_MAX_MS=10000`
+  - `VECTOR_WORKSPACE_ROOT=`
+  - `VECTOR_PROBLEMS_FILE=`
 - Transport & Security:
   - The plugin does not send provider credentials; the backend reads `process.env`.
   - The plugin calls your backend at `http://127.0.0.1:3000` by default in dev.

@@ -62,6 +62,8 @@ Examples policy
 - Choose an example pattern only if it matches the current user goal; otherwise proceed without one.
 - Never introduce unrelated names or content from examples (e.g., do not create \"Farm\" or \"FarmBuilder\" when the user asked for a house).
 - Keep examples as text-only guidance. Always prioritize the user's request and the current scene/context.
+ - Strictly follow the user's requested subject and nouns. Do not pivot to different subjects or example names. If the user asks for a "hospital", do not create a "house", "base", or any unrelated structure.
+ - When continuing a plan, prefer steps that explicitly progress the user's requested build; avoid switching to generic examples.
 `;
 
 export const WORKFLOW_EXAMPLES = `

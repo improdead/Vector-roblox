@@ -40,9 +40,15 @@ function canAutoApproveObject(proposal: ObjectProposal): boolean {
   })
 }
 
-function canAutoApproveAsset(proposal: AssetProposal): boolean {
+function canAutoApproveAsset(proposal: AssetProposal, opts?: { autoEnabled?: boolean }): boolean {
+  // Insert proposals: safe if parentPath is a safe prefix (defaults to Workspace)
   if (proposal.insert) {
     return isSafePath(proposal.insert.parentPath || 'game.Workspace')
+  }
+  // Search proposals: allow when Auto mode is enabled.
+  // The plugin will fetch results and insert at most one best match.
+  if (proposal.search && opts?.autoEnabled) {
+    return true
   }
   return false
 }
@@ -55,7 +61,7 @@ export function annotateAutoApproval<T extends Proposal>(proposals: T[], opts: {
     let autoApproved = false
     if (p.type === 'edit') autoApproved = canAutoApproveEdit(p as EditProposal)
     if (p.type === 'object_op') autoApproved = canAutoApproveObject(p as ObjectProposal)
-    if (p.type === 'asset_op') autoApproved = canAutoApproveAsset(p as AssetProposal)
+    if (p.type === 'asset_op') autoApproved = canAutoApproveAsset(p as AssetProposal, { autoEnabled: opts.autoEnabled })
     if (p.type === 'completion') autoApproved = false
     return { ...p, meta: { ...(p.meta || {}), autoApproved } }
   })

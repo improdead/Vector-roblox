@@ -108,6 +108,12 @@ async function fetchFromRoblox(query: string, limit: number, opts?: CatalogSearc
     SortAggregation: '3',
     SortType: '3',
   })
+  // Optional: restrict to free assets only when explicitly requested
+  const freeOnly = String(process.env.CATALOG_FREE_ONLY || '0') === '1'
+  if (freeOnly) {
+    // Prefer Roblox sales filter for free items; explicit price filters often 0-out results
+    params.set('SalesTypeFilter', '1')
+  }
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), Number(process.env.CATALOG_TIMEOUT_MS || 15000))
   try {
@@ -122,7 +128,29 @@ async function fetchFromRoblox(query: string, limit: number, opts?: CatalogSearc
     }
     const json = (await res.json()) as { data?: any[] }
     const results = Array.isArray(json?.data) ? json.data : []
-    const sliced = results.slice(0, desiredLimit)
+    // Filter to model-like assets if category requested Models
+    const allowAssetTypes = new Set<number>([8, 27, 46])
+    const typed = category === 'Models'
+      ? results.filter((entry: any) => typeof entry?.assetType === 'number' && allowAssetTypes.has(Number(entry.assetType)))
+      : results
+    let sliced = typed.slice(0, desiredLimit)
+    // Fallback: if no results and query has multiple words, retry with first word and without free-only caps
+    if (sliced.length === 0 && /\s/.test(trimmedQuery)) {
+      const firstWord = trimmedQuery.split(/\s+/)[0]
+      const retry = new URLSearchParams(params)
+      retry.set('Keyword', firstWord)
+      retry.delete('MaxPrice')
+      retry.delete('MinPrice')
+      const res2 = await fetch(`${ROBLOX_CATALOG_URL}?${retry.toString()}`, { headers: { Accept: 'application/json' } })
+      if (res2.ok) {
+        const json2 = (await res2.json()) as { data?: any[] }
+        const results2 = Array.isArray(json2?.data) ? json2.data : []
+        const typed2 = category === 'Models'
+          ? results2.filter((entry: any) => typeof entry?.assetType === 'number' && allowAssetTypes.has(Number(entry.assetType)))
+          : results2
+        sliced = typed2.slice(0, desiredLimit)
+      }
+    }
     const thumbMap = await fetchRobloxThumbnails(sliced.map((item) => item?.id as number))
     const items: CatalogItem[] = []
     for (const entry of sliced) {
@@ -169,10 +197,75 @@ async function fetchFromExternalProvider(baseUrl: string, query: string, limit: 
   }
 }
 
+async function fetchFromCreatorStoreToolbox(query: string, limit: number, opts?: CatalogSearchOptions): Promise<CatalogItem[]> {
+  const apiKey = normalizeString(process.env.ROBLOX_OPEN_CLOUD_API_KEY)
+  if (!apiKey) throw new Error('Missing ROBLOX_OPEN_CLOUD_API_KEY')
+  const url = new URL('https://apis.roblox.com/toolbox-service/v2/assets:search')
+  url.searchParams.set('searchCategoryType', 'Model')
+  url.searchParams.set('query', query || '')
+  url.searchParams.set('maxPageSize', String(Math.max(1, Math.min(100, limit || 8))))
+  // Broaden results by allowing all creators (verified and non-verified)
+  url.searchParams.set('includeOnlyVerifiedCreators', 'false')
+  // Free-only via price caps in cents
+  if (String(process.env.CATALOG_FREE_ONLY || '0') === '1') {
+    url.searchParams.set('minPriceCents', '0')
+    url.searchParams.set('maxPriceCents', '0')
+  }
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), Number(process.env.CATALOG_TIMEOUT_MS || 15000))
+  try {
+    const res = await fetch(url.toString(), {
+      method: 'GET',
+      signal: controller.signal,
+      headers: { 'Accept': 'application/json', 'x-api-key': apiKey },
+    })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      console.error(`[catalog] creator-store error status=${res.status} url=${url.toString()} bodyLen=${body.length}`)
+      throw new Error(`Creator Store provider error ${res.status}`)
+    }
+    const json = await res.json().catch(() => ({} as any))
+    // Toolbox returns creatorStoreAssets[] with nested asset fields
+    const arr: any[] = Array.isArray((json as any)?.creatorStoreAssets)
+      ? (json as any).creatorStoreAssets
+      : (Array.isArray((json as any)?.results) ? (json as any).results : [])
+    if (!Array.isArray(arr)) throw new Error('Invalid creator-store response')
+    const items: CatalogItem[] = []
+    for (const entry of arr) {
+      const asset = entry?.asset ?? entry
+      const id = Number(asset?.id ?? entry?.assetId)
+      if (!Number.isFinite(id)) continue
+      const name = String(asset?.name ?? asset?.displayName ?? `Asset ${id}`)
+      const creator = String(entry?.creator?.name ?? entry?.creatorName ?? 'Unknown')
+      const type = String(asset?.assetTypeId ?? 'Model')
+      let thumbnailUrl: string | undefined
+      const thumbs = asset?.previewAssets?.imagePreviewAssets || entry?.thumbnails || entry?.previews
+      if (Array.isArray(thumbs) && thumbs.length > 0) {
+        // Toolbox imagePreviewAssets are asset ids; thumbnails route might be needed separately.
+        // Use undefined here; downstream can fetch thumbnails by id if needed.
+      }
+      items.push({ id, name, creator, type, thumbnailUrl })
+    }
+    return items.slice(0, Math.max(1, Math.min(50, limit || 8)))
+  } finally {
+    clearTimeout(timeout)
+  }
+}
+
 export async function searchRobloxCatalog(query: string, limit: number, opts?: CatalogSearchOptions): Promise<CatalogItem[]> {
   const override = normalizeString(process.env.CATALOG_API_URL)
   if (override && override.toLowerCase() !== 'roblox') {
     return fetchFromExternalProvider(override, query, limit, opts)
+  }
+  // Prefer Creator Store Toolbox when requested and key present
+  const useCreatorStore = String(process.env.CATALOG_USE_CREATOR_STORE || '0') === '1'
+  if (useCreatorStore && normalizeString(process.env.ROBLOX_OPEN_CLOUD_API_KEY)) {
+    try {
+      const items = await fetchFromCreatorStoreToolbox(query, limit, opts)
+      if (items.length > 0) return items
+    } catch (e) {
+      console.warn('[catalog] creator-store fallback to public catalog', (e as any)?.message || e)
+    }
   }
   return fetchFromRoblox(query, limit, opts)
 }

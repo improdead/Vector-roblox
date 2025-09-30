@@ -8,7 +8,10 @@
     "build": "next build",
     "start": "next start -p 3000",
     "lint": "eslint . --ext .ts,.tsx --max-warnings=0",
-    "test:orchestrator": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node lib/orchestrator/index.test.ts"
+    "test:orchestrator": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node lib/orchestrator/index.test.ts",
+    "test:providers": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-providers.ts",
+    "test:select": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-select.ts",
+    "test:catalog": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-catalog.ts"
   },
   "dependencies": {
     "adm-zip": "^0.5.12",

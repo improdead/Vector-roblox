@@ -60,7 +60,14 @@ export type ChatInput = {
     scene?: { nodes?: { path: string; className: string; name: string; parentPath?: string; props?: Record<string, unknown> }[] }
     codeDefinitions?: { file: string; line: number; name: string }[]
   }
-  provider?: { name: 'openrouter' | 'gemini'; apiKey: string; model?: string; baseUrl?: string }
+  provider?: {
+    name: 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
+    apiKey: string
+    model?: string
+    baseUrl?: string
+    region?: string
+    deploymentId?: string
+  }
   modelOverride?: string | null
   autoApply?: boolean
   mode?: 'ask' | 'agent'
@@ -97,6 +104,8 @@ function computeAnchors(baseText: string, edits: Edit[]): EditAnchors {
 // Provider call
 import { callOpenRouter } from './providers/openrouter'
 import { callGemini } from './providers/gemini'
+import { callBedrock } from './providers/bedrock'
+import { callNvidia } from './providers/nvidia'
 import { z } from 'zod'
 import { Tools } from '../tools/schemas'
 import { setLastTool } from '../store/sessions'
@@ -125,13 +134,15 @@ import {
   hydrateSceneSnapshot,
 } from './sceneGraph'
 
-type ProviderMode = 'openrouter' | 'gemini'
+type ProviderMode = 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
 
 type ProviderSelection = {
   mode: ProviderMode
   apiKey: string
   model?: string
   baseUrl?: string
+  region?: string
+  deploymentId?: string
 }
 
 const SCRIPT_CLASS_NAMES = new Set(['Script', 'LocalScript', 'ModuleScript'])
@@ -239,23 +250,47 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
   const { input, modelOverride } = opts
   const overrideRaw = normalizeString(modelOverride)
   const overrideIsGemini = !!overrideRaw && overrideRaw.toLowerCase().startsWith('gemini')
+  const nvidiaKeyPresent = !!normalizeString(process.env.NVIDIA_API_KEY) || !!normalizeString(process.env.NVIDIA_VIM_API_KEY)
+  const bedrockKeyPresent = !!normalizeString(process.env.AWS_BEARER_TOKEN_BEDROCK) || !!normalizeString(process.env.AWS_BEDROCK_API_KEY)
+
+  // Vendor-style prefixes like "anthropic.", "qwen.", etc. strongly indicate Bedrock models
+  const overrideHasVendorPrefix = !!overrideRaw && /^(anthropic|qwen|mistral|meta|cohere|ai21|amazon)\./i.test(overrideRaw)
+  const overrideLooksVersioned = !!overrideRaw && /:\d|:v\d/i.test(overrideRaw)
+  const overrideExplicitBedrock = !!overrideRaw && /^bedrock:/i.test(overrideRaw)
+  const overrideIsBedrock = !!overrideRaw && !overrideIsGemini && (overrideHasVendorPrefix || overrideLooksVersioned || overrideExplicitBedrock)
+
+  // Treat NVIDIA-style overrides as those without vendor prefix/version and that look like NVIDIA/NIM/Qwen3
+  const overrideIsNvidia = !!overrideRaw && !overrideIsBedrock && (/^qwen3/i.test(overrideRaw) || /\bnim\b/i.test(overrideRaw) || /\bnvidia\b/i.test(overrideRaw) || /qwen-?coder/i.test(overrideRaw))
   const defaultProviderEnv = normalizeString(process.env.VECTOR_DEFAULT_PROVIDER)?.toLowerCase()
   const forceOpenRouter = (process.env.VECTOR_USE_OPENROUTER || '0') === '1'
+  const debug = (process.env.VECTOR_DEBUG || process.env.PROVIDER_DEBUG || '0') === '1'
+
+  const keys = {
+    openrouter: !!normalizeString(process.env.OPENROUTER_API_KEY),
+    gemini:     !!normalizeString(process.env.GEMINI_API_KEY),
+    bedrock:    bedrockKeyPresent,
+    nvidia:     nvidiaKeyPresent,
+  }
 
   const preference: ProviderMode[] = []
-  if (overrideRaw) preference.push(overrideIsGemini ? 'gemini' : 'openrouter')
+  if (overrideRaw) preference.push(overrideIsGemini ? 'gemini' : (overrideIsBedrock ? 'bedrock' : (overrideIsNvidia ? 'nvidia' : 'openrouter')))
   if (input.provider?.name === 'gemini') preference.push('gemini')
   if (input.provider?.name === 'openrouter') preference.push('openrouter')
+  if ((input as any).provider?.name === 'bedrock') preference.push('bedrock')
+  if ((input as any).provider?.name === 'nvidia') preference.push('nvidia')
   if (defaultProviderEnv === 'gemini') preference.push('gemini')
   if (defaultProviderEnv === 'openrouter') preference.push('openrouter')
+  if (defaultProviderEnv === 'bedrock') preference.push('bedrock')
+  if (defaultProviderEnv === 'nvidia') preference.push('nvidia')
   if (forceOpenRouter) preference.push('openrouter')
   // Ensure we eventually try both providers as fallbacks in a deterministic order
-  preference.push('gemini', 'openrouter')
+  preference.push('gemini', 'nvidia', 'bedrock', 'openrouter')
 
   const ordered: ProviderMode[] = []
   for (const mode of preference) {
     if (!ordered.includes(mode)) ordered.push(mode)
   }
+  if (debug) console.log(`[provider.select] override=${overrideRaw || 'none'} default=${defaultProviderEnv || 'none'} keys=${JSON.stringify(keys)} order=${ordered.join('>')}`)
 
   for (const mode of ordered) {
     if (mode === 'openrouter') {
@@ -280,6 +315,30 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
         normalizeString(process.env.GEMINI_MODEL)
       const baseUrl = normalizeString(providerInput?.baseUrl) || normalizeString(process.env.GEMINI_API_BASE_URL)
       return { mode, apiKey, model, baseUrl }
+    }
+
+    if (mode === 'bedrock') {
+      const providerInput = (input as any).provider?.name === 'bedrock' ? ((input as any).provider as any) : undefined
+      const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.AWS_BEARER_TOKEN_BEDROCK) || normalizeString(process.env.AWS_BEDROCK_API_KEY)
+      if (!apiKey) continue
+      const model =
+        normalizeString(providerInput?.model) ||
+        (overrideIsBedrock ? overrideRaw : undefined) ||
+        normalizeString(process.env.BEDROCK_MODEL) ||
+        normalizeString(process.env.AWS_BEDROCK_MODEL)
+      const region = normalizeString((providerInput as any)?.region) || normalizeString(process.env.AWS_BEDROCK_REGION)
+      return { mode, apiKey, model, region }
+    }
+
+    if (mode === 'nvidia') {
+      const providerInput = (input as any).provider?.name === 'nvidia' ? ((input as any).provider as any) : undefined
+      const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.NVIDIA_API_KEY) || normalizeString(process.env.NVIDIA_VIM_API_KEY)
+      if (!apiKey) continue
+      const model = normalizeString(providerInput?.model) || (overrideIsNvidia ? overrideRaw : undefined) || normalizeString(process.env.NVIDIA_MODEL)
+      const baseUrl = normalizeString(providerInput?.baseUrl) || normalizeString(process.env.NVIDIA_API_BASE_URL)
+      const deploymentId = normalizeString((providerInput as any)?.deploymentId) || normalizeString(process.env.NVIDIA_DEPLOYMENT_ID)
+      if (debug) console.log(`[provider.select] choose=nvidia model=${model || 'default'} base=${baseUrl || 'default'} deployment=${deploymentId || 'none'}`)
+      return { mode, apiKey, model, baseUrl, deploymentId }
     }
   }
 
@@ -314,8 +373,11 @@ const PROMPT_SECTIONS = [
 - Edits are 0-based, non-overlapping, ≤20 edits and ≤2000 inserted chars.`,
   `Assets & 3D
   - Prefer search_assets → insert_asset for props/models. Use create_instance only for simple primitive geometry or when catalog search fails/disabled.
+  - Composite scenes (e.g., park, plaza, town square): it is acceptable to add multiple distinct assets (e.g., trees, benches, fountain, lights) as separate search_assets → insert_asset steps in the plan. Keep it concise: 2–4 categories initially, each with limit ≤ 6.
+  - Single‑subject builds (e.g., hospital, watch tower): avoid adding unrelated props unless requested. If a container model (e.g., game.Workspace.Hospital) already exists, do not recreate it; prefer inserting exactly one primary asset (e.g., a hospital building) under a sensible child like "Imported", or add obviously missing interior kits/furnishings.
+  - In Auto mode (autoApply=true), prefer choosing a single best match and inserting it directly without listing. Do not insert multiples unless the user explicitly asks for more than one.
   - search_assets limit ≤ 6 unless the user asks. Include helpful tags.
-  - insert_asset defaults parentPath to game.Workspace if unknown.`,
+  - insert_asset defaults parentPath to game.Workspace if unknown. Before creating or inserting, inspect existing children (list_children) and skip duplicates when names/roles already exist.`,
   `Scene building
   - Always think through the layout before acting: use <start_plan> to outline the main structures, then execute steps one tool at a time.
   - Inspect what already exists. If nothing is selected, call <list_children> on game.Workspace (depth 1–2) to inventory the scene; also use <list_selection> and <get_active_script>. Reuse or extend Models instead of duplicating them.
@@ -357,32 +419,32 @@ Insert an asset (preferred)
   <parentPath>game.Workspace</parentPath>
 </insert_asset>
 
-Build simple geometry
+Build simple geometry (generic)
 <start_plan>
-  <steps>["Create 'House' model under Workspace","Create 'Floor' Part with size 16x1x16 at y=0.5 Anchored","Create 'WallFront' Part 16x8x1 at z=-7.5 Anchored","Create 'Roof' Part 16x1x16 with slight tilt Anchored"]</steps>
+  <steps>["Create 'Structure' model under Workspace","Create 'Floor' Part with size 16x1x16 at y=0.5 Anchored","Create 'WallFront' Part 16x8x1 at z=-7.5 Anchored","Create 'Roof' Part 16x1x16 with slight tilt Anchored"]</steps>
 </start_plan>
 
 <create_instance>
   <className>Model</className>
   <parentPath>game.Workspace</parentPath>
-  <props>{"Name":"House"}</props>
+  <props>{"Name":"Structure"}</props>
 </create_instance>
 
 <create_instance>
   <className>Part</className>
-  <parentPath>game.Workspace.House</parentPath>
+  <parentPath>game.Workspace.Structure</parentPath>
   <props>{"Name":"Floor","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]},"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"WoodPlanks"}}</props>
 </create_instance>
 
 <create_instance>
   <className>Part</className>
-  <parentPath>game.Workspace.House</parentPath>
+  <parentPath>game.Workspace.Structure</parentPath>
   <props>{"Name":"WallFront","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":8,"z":1},"CFrame":{"__t":"CFrame","comps":[0,4.5,-7.5, 1,0,0, 0,1,0, 0,0,1]},"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Brick"}}</props>
 </create_instance>
 
 <create_instance>
   <className>Part</className>
-  <parentPath>game.Workspace.House</parentPath>
+  <parentPath>game.Workspace.Structure</parentPath>
   <props>{"Name":"Roof","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,8.6,0, 1,0,0, 0,0.5,-0.8660254, 0,0.8660254,0.5]},"Color":{"__t":"Color3","r":0.6,"g":0.2,"b":0.2}}</props>
 </create_instance>`
 ]
@@ -546,7 +608,7 @@ function parseXmlObject(input: string): Record<string, any> | null {
 }
 
 function toClassWhitelist(raw: any): Record<string, boolean> | undefined {
-  const emit = (names: string[]): Record<string, boolean> => {
+  const emit = (names: string[]): Record<string, boolean> | undefined => {
     const out: Record<string, boolean> = {}
     for (const n of names) {
       const t = String(n || '').trim()
@@ -1096,7 +1158,7 @@ function proposalTouchesGeometry(proposal: Proposal): boolean {
   return false
 }
 
-export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[]; taskState: TaskState }> {
+export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[]; taskState: TaskState; tokenTotals: { in: number; out: number } }> {
   const rawMessage = input.message.trim()
   const { cleaned, attachments } = await extractMentions(rawMessage)
   const msg = cleaned.length > 0 ? cleaned : rawMessage
@@ -1288,7 +1350,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   const catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
   let scriptWarnings = 0
 
-  const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState } => {
+  const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState; tokenTotals: { in: number; out: number } } => {
     const annotated = annotateAutoApproval(list, { autoEnabled })
     const totalsIn = taskState.counters.tokensIn
     const totalsOut = taskState.counters.tokensOut
@@ -1301,7 +1363,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       pushChunk(streamKey, 'completed: model_complete')
       // Optional: checkpoint marker could be added here if we had a server-side checkpoint manager
     }
-    return { proposals: annotated, taskState }
+    return { proposals: annotated, taskState, tokenTotals: { in: totalsIn, out: totalsOut } }
   }
 
   // Deterministic templates for milestone verification
@@ -1380,7 +1442,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         const timeoutMs = Number(
           activeProvider === 'gemini'
             ? process.env.GEMINI_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
-            : process.env.OPENROUTER_TIMEOUT_MS || 30000,
+            : activeProvider === 'bedrock'
+              ? process.env.BEDROCK_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
+              : process.env.OPENROUTER_TIMEOUT_MS || 30000,
         )
         const resp = activeProvider === 'gemini'
           ? await callGemini({
@@ -1391,14 +1455,33 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
               baseUrl: providerSelection.baseUrl,
               timeoutMs,
             })
-          : await callOpenRouter({
-              systemPrompt: SYSTEM_PROMPT,
-              messages: convo as any,
-              model: providerSelection.model,
-              apiKey: providerSelection.apiKey,
-              baseUrl: providerSelection.baseUrl,
-              timeoutMs,
-            })
+          : activeProvider === 'bedrock'
+            ? await callBedrock({
+                systemPrompt: SYSTEM_PROMPT,
+                messages: convo as any,
+                model: providerSelection.model,
+                apiKey: providerSelection.apiKey,
+                region: (providerSelection as any).region,
+                timeoutMs,
+              })
+            : activeProvider === 'nvidia'
+            ? await callNvidia({
+                systemPrompt: SYSTEM_PROMPT,
+                messages: convo as any,
+                model: providerSelection.model,
+                apiKey: providerSelection.apiKey,
+                baseUrl: providerSelection.baseUrl,
+                deploymentId: (providerSelection as any).deploymentId,
+                timeoutMs,
+              })
+            : await callOpenRouter({
+                systemPrompt: SYSTEM_PROMPT,
+                messages: convo as any,
+                model: providerSelection.model,
+                apiKey: providerSelection.apiKey,
+                baseUrl: providerSelection.baseUrl,
+                timeoutMs,
+              })
         content = resp.content || ''
         pushChunk(streamKey, `provider.response provider=${activeProvider} turn=${turn} chars=${content.length}`)
         console.log(`[orch] provider.ok provider=${activeProvider} turn=${turn} contentLen=${content.length}`)
@@ -1637,7 +1720,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
           const classWhitelist = (a as any).classWhitelist && typeof (a as any).classWhitelist === 'object' && !Array.isArray((a as any).classWhitelist)
             ? (a as any).classWhitelist
             : undefined
-          result = listSceneChildren(taskState, { parentPath, depth, maxNodes, classWhitelist })
+          const inputObj: any = { parentPath, depth, maxNodes }
+          if (classWhitelist) inputObj.classWhitelist = classWhitelist
+          result = listSceneChildren(taskState, inputObj)
         } else if (name === 'get_properties') {
           const targetPath = typeof (a as any).path === 'string' ? (a as any).path : undefined
           if (!targetPath) {
