@@ -42,10 +42,11 @@ This document tracks what’s implemented, partial (placeholder or limited), and
   - `CATALOG_DISABLE_SEARCH=1` can be used to force manual creation flows; otherwise `<search_assets>` proposals are allowed by default.
   - Plugin forwards model-provided tags to `/api/assets/search`, enabling category-aware lookups without bespoke proxy services.
 - Provider selection hardening (July 2026):
-  - Added a deterministic provider chooser so OpenRouter and Gemini never mix credentials or model overrides, honoring `VECTOR_DEFAULT_PROVIDER` plus user overrides.
-  - Gemini client now enforces type-checked responses and fails fast on empty or safety-blocked completions, keeping the orchestrator from continuing with blank output.
+  - Added a deterministic provider chooser so OpenRouter, Gemini, AWS Bedrock, and NVIDIA never mix credentials or model overrides, honoring `VECTOR_DEFAULT_PROVIDER` plus user overrides.
+  - Added Bedrock adapter (InvokeModel JSON) and NVIDIA adapter (OpenAI-compatible / NIM) with normalized XML-ish single-tool parsing.
+  - Gemini client enforces type-checked responses and fails fast on empty or safety-blocked completions, keeping the orchestrator from continuing with blank output.
   - Catalog search logging sanitizes queries, records provider (roblox vs proxy), and still nudges models to fall back to manual creation if catalog lookups fail.
-  - `.env.example` and `.env.local` were deduplicated with a single provider block covering `GEMINI_*` settings alongside OpenRouter.
+  - `.env.example` and `.env.local` expanded with `BEDROCK_*` and `NVIDIA_*` variables.
 - Checkpoints + conflict loop (July 2026):
   - Automatic per-user-message checkpoints now run after each applied proposal; manual Snapshot/Restore buttons in the plugin call the API, stream status updates, and refresh TaskState metadata.
   - Diff3-powered multi-file apply runs on the server, returning structured conflict hunks when merges fail; the plugin renders those hunks inside the diff viewer and blocks auto-apply.
@@ -273,17 +274,13 @@ This document tracks what’s implemented, partial (placeholder or limited), and
 ## Needs From You
 
 - Provider credentials/decisions
-  - OpenRouter-compatible provider (backend `.env.local`):
-    - `OPENROUTER_API_KEY` (required to enable provider path),
-    - `OPENROUTER_MODEL` (optional),
-    - `VECTOR_USE_OPENROUTER=1` to force provider usage even if the plugin omits credentials.
-  - Gemini direct provider (optional):
-    - `GEMINI_API_KEY` (required to call Gemini directly),
-    - `GEMINI_MODEL`, `GEMINI_API_BASE_URL`, `GEMINI_TIMEOUT_MS` (optional overrides).
-  - `VECTOR_DEFAULT_PROVIDER` selects the default between `openrouter` and `gemini` when no explicit override is supplied.
-  - Decide default model(s).
-  - Optional: set `VECTOR_MAX_TURNS` (default 4) to control multi-turn depth.
-  - Optional: set `OPENROUTER_TIMEOUT_MS` (default 30000) to cap provider calls.
+  - OpenRouter: `OPENROUTER_API_KEY`, `OPENROUTER_MODEL`, `VECTOR_USE_OPENROUTER`.
+  - Gemini: `GEMINI_API_KEY`, `GEMINI_MODEL`, `GEMINI_API_BASE_URL`, `GEMINI_TIMEOUT_MS`.
+  - AWS Bedrock: `BEDROCK_REGION`, `BEDROCK_MODEL_ID`, and either role-based AWS auth or `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` (+ `AWS_SESSION_TOKEN` optional).
+  - NVIDIA: `NVIDIA_API_KEY`, `NVIDIA_MODEL`, optional `NVIDIA_API_BASE_URL`.
+  - `VECTOR_DEFAULT_PROVIDER` selects default among `openrouter|gemini|bedrock|nvidia` when no override is supplied.
+  - Decide default model(s) + fallback order.
+  - Optional: `VECTOR_MAX_TURNS` (default 4); timeouts per provider (`OPENROUTER_TIMEOUT_MS`, `GEMINI_TIMEOUT_MS`).
 
 - Catalog provider
   - Built-in Roblox catalog search now runs when `CATALOG_API_URL` is unset (or set to `roblox`); no proxy is required for local workflows.
@@ -321,7 +318,10 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - `VECTOR_USE_OPENROUTER=0` by default (set to `1` to enable provider),
     - `VECTOR_MAX_TURNS` (optional), `VECTOR_DISABLE_FALLBACKS` (optional),
     - `CATALOG_API_URL`/`CATALOG_API_KEY`/`CATALOG_TIMEOUT_MS` (optional),
-    - `MESHY_API_KEY` (optional).
+  - `MESHY_API_KEY` (optional),
+  - `GEMINI_API_KEY` / `GEMINI_MODEL` (optional),
+  - `BEDROCK_REGION` / `BEDROCK_MODEL_ID` (optional; plus AWS creds or role),
+  - `NVIDIA_API_KEY` / `NVIDIA_MODEL` (optional).
   - Data directory: proposals persisted at `vector/apps/web/data/proposals.json` (auto-created).
   - Data directory: workflows persisted at `vector/apps/web/data/workflows.json` (auto-created).
   - `.gitignore` excludes env files under `vector/apps/web` and the local `data/` folder.

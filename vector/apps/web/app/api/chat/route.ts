@@ -5,10 +5,12 @@ import { runLLM } from '../../../lib/orchestrator'
 import { saveProposals } from '../../../lib/store/proposals'
 
 const ProviderSchema = z.object({
-  name: z.enum(['openrouter', 'gemini']),
+  name: z.enum(['openrouter', 'gemini', 'bedrock', 'nvidia']),
   apiKey: z.string().min(1),
   baseUrl: z.string().url().optional(),
   model: z.string().optional(),
+  region: z.string().optional(),
+  deploymentId: z.string().min(1).optional(),
 }).optional()
 
 const ChatSchema = z.object({
@@ -69,7 +71,7 @@ export async function POST(req: Request) {
       pushChunk(workflowId, 'planning: started')
     }
 
-    const { proposals, taskState } = await runLLM(input as any)
+    const { proposals, taskState, tokenTotals } = await runLLM(input as any)
     console.log(`[chat] proposals.count=${proposals.length}`)
     const isComplete = proposals.some((p: any) => p && p.type === 'completion')
 
@@ -85,7 +87,7 @@ export async function POST(req: Request) {
       console.warn('[chat] persist.warn non-fatal', e)
     }
 
-    return Response.json({ workflowId, proposals, taskState, isComplete })
+    return Response.json({ workflowId, proposals, taskState, tokenTotals, isComplete })
   } catch (err: any) {
     const msg = err?.message || 'Unknown error'
     const status = /invalid/i.test(msg) ? 400 : 500

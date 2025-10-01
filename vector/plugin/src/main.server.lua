@@ -36,6 +36,9 @@ local CURRENT_MODE = "agent" -- or "ask"
 local MODEL_OPTIONS = {
 	{ id = "openrouter", label = "OpenRouter (.env)", override = nil },
 	{ id = "gemini-2.5-flash", label = "Gemini (direct)", override = "gemini-2.5-flash" },
+	{ id = "bedrock-claude", label = "Claude (Bedrock)", override = "anthropic.claude-3-5-sonnet-20240620-v1:0" },
+	{ id = "bedrock-qwen-coder", label = "Qwen Coder (Bedrock)", override = "qwen.qwen3-coder-30b-a3b-v1:0" },
+	{ id = "nvidia-qwen-coder", label = "Qwen Next (NVIDIA)", override = "qwen3-next-80b-a3b-instruct" },
 }
 
 local function clampModelIndex(idx)
@@ -2260,12 +2263,12 @@ local function toggleDock()
 				end
 			end
 			return appliedAny
-		elseif p.type == "asset_op" then
-			if p.insert and p.insert.assetId then
-				local assetId = tonumber(p.insert.assetId)
-				if assetId then
-					ui.addStatus("auto.insert asset " .. tostring(assetId))
-					local ok, modelOrErr = insertAsset(assetId, p.insert.parentPath)
+	elseif p.type == "asset_op" then
+		if p.insert and p.insert.assetId then
+			local assetId = tonumber(p.insert.assetId)
+			if assetId then
+				ui.addStatus("auto.insert asset " .. tostring(assetId))
+				local ok, modelOrErr = insertAsset(assetId, p.insert.parentPath)
 					if ok then
 						_G.__VECTOR_LAST_ASSET_ERROR = nil
 						local insertedPath = nil
@@ -2288,6 +2291,7 @@ local function toggleDock()
 					reportApply(p.id, { ok = false, type = p.type, op = "insert_asset", error = "invalid_asset_id" })
 				end
 			elseif p.search then
+				-- Auto-mode: run a single search, insert the best match under a sensible parent
 				if _G.__VECTOR_AUTO then
 					local query = p.search.query or ""
 					ui.addStatus("auto.asset_search " .. tostring(query))
@@ -2297,9 +2301,23 @@ local function toggleDock()
 							local first = resultsOrErr[1]
 							local assetId = tonumber(first and first.id)
 							if assetId then
-								ui.addStatus("auto.asset_search insert " .. tostring(assetId))
+								-- Choose a default parent: selected container → Workspace.Hospital → Workspace
+								local desiredParentPath = nil
+								local sel = Selection:Get()
+								if type(sel) == "table" and #sel == 1 and sel[1] and sel[1].GetFullName then
+									local okPath, pathOrErr = pcall(function() return sel[1]:GetFullName() end)
+									if okPath and type(pathOrErr) == "string" then desiredParentPath = pathOrErr end
+								end
+								if not desiredParentPath then
+									local hosp = workspace:FindFirstChild("Hospital")
+									if hosp and hosp.GetFullName then
+										local okPath, pathOrErr = pcall(function() return hosp:GetFullName() end)
+										if okPath and type(pathOrErr) == "string" then desiredParentPath = pathOrErr end
+									end
+								end
+								ui.addStatus("auto.asset_search insert " .. tostring(assetId) .. (desiredParentPath and (" → " .. desiredParentPath) or ""))
 								ensurePermissionWithStatus()
-								local okInsert, modelOrErr = insertAsset(assetId, nil)
+								local okInsert, modelOrErr = insertAsset(assetId, desiredParentPath)
 								if okInsert then
 									_G.__VECTOR_LAST_ASSET_ERROR = nil
 									local insertedPath = nil
@@ -2308,13 +2326,13 @@ local function toggleDock()
 										insertedPath = success and value or nil
 									end
 									ui.addStatus("auto.ok asset")
-									reportApply(p.id, { ok = true, type = p.type, op = "search_insert", assetId = assetId, insertedPath = insertedPath, query = query })
+									reportApply(p.id, { ok = true, type = p.type, op = "search_insert", assetId = assetId, insertedPath = insertedPath, query = query, parentPath = desiredParentPath })
 									return true
 								else
 									local errMsg = tostring(modelOrErr)
 									_G.__VECTOR_LAST_ASSET_ERROR = errMsg or "insert_failed"
 									ui.addStatus("auto.err asset " .. errMsg)
-									reportApply(p.id, { ok = false, type = p.type, op = "search_insert", assetId = assetId, query = query, error = errMsg })
+									reportApply(p.id, { ok = false, type = p.type, op = "search_insert", assetId = assetId, query = query, parentPath = desiredParentPath, error = errMsg })
 								end
 							else
 								ui.addStatus("auto.err asset invalid id")
