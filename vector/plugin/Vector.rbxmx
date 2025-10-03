@@ -2744,10 +2744,7 @@ local function maybeAutoContinue(workflowId)
 				steps += 1
 				ui.addStatus("auto.next step " .. tostring(steps))
 				local followup = "Next step: propose exactly one small, safe action."
-				if _G.__VECTOR_LAST_ASSET_ERROR then
-					followup = followup .. " Asset search/insert failed (" .. tostring(_G.__VECTOR_LAST_ASSET_ERROR) .. "). Please build manually using create_instance/set_properties, or write Luau to rebuild the scene."
-					_G.__VECTOR_LAST_ASSET_ERROR = nil
-				end
+				_G.__VECTOR_LAST_ASSET_ERROR = nil
 				local mode = CURRENT_MODE
 				local opts = { mode = mode, maxTurns = (mode == "ask") and 1 or nil, enableFallbacks = true, modelOverride = getModelOverride(), autoApply = _G.__VECTOR_AUTO }
 				local resp = sendChat("local", followup, buildContextSnapshot(), workflowId, opts)
@@ -3277,6 +3274,69 @@ local function resolveByFullName(path)
     return cur
 end
 
+local function ensureParentExists(path)
+    if type(path) ~= "string" or #path == 0 then return nil end
+
+    local function tokenize(full)
+        local tokens = {}
+        local buf, inBr = {}, false
+        local function flush()
+            if #buf > 0 then
+                table.insert(tokens, table.concat(buf))
+                buf = {}
+            end
+        end
+        for i = 1, #full do
+            local ch = string.sub(full, i, i)
+            if ch == "[" then
+                inBr = true
+            elseif ch == "]" then
+                inBr = false
+            elseif ch == "." and not inBr then
+                flush()
+            else
+                table.insert(buf, ch)
+            end
+        end
+        flush()
+        return tokens
+    end
+
+    local tokens = tokenize(path)
+    if tokens[1] == "game" then
+        table.remove(tokens, 1)
+    end
+    if #tokens == 0 then return nil end
+
+    local rootName = tokens[1]
+    local okService, current = pcall(function()
+        return game:GetService(rootName)
+    end)
+    if not okService or not current then
+        current = game:FindFirstChild(rootName)
+        if not current then
+            return nil
+        end
+    end
+
+    for i = 2, #tokens do
+        local name = tokens[i]
+        local child = current:FindFirstChild(name)
+        if not child then
+            if current == workspace or current:IsDescendantOf(workspace) then
+                child = Instance.new("Model")
+                child.Name = name
+                child.Parent = current
+            else
+                return nil
+            end
+        end
+        current = child
+    end
+
+    return current
+end
+
 local function deserialize(v)
     if type(v) ~= "table" or v.__t == nil then return v end
     local t = v.__t
@@ -3338,7 +3398,7 @@ return function(className, parentPath, props)
     if type(className) ~= "string" then
         return { ok = false, error = "Missing className" }
     end
-    local parent = resolveByFullName(parentPath)
+    local parent = resolveByFullName(parentPath) or ensureParentExists(parentPath) or resolveByFullName(parentPath)
     if not parent then
         return { ok = false, error = "Parent not found: " .. tostring(parentPath) }
     end
