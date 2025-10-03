@@ -363,10 +363,69 @@ const PROMPT_SECTIONS = [
 - start_plan / update_plan: create and maintain a single plan; use update_plan to adjust.
 - open_or_create_script / show_diff: author idempotent Luau when needed.
 - complete / final_message / message: summaries and updates.`,
-  `Manual mode
-- If the user forbids assets or catalog fails, manual mode is active: asset tools/commands are disabled.
-- In manual mode, do not create new container Models until a Part exists or builder Luau is written.
-- Do not complete while manual mode has zero geometry and zero Luau edits.`,
+String.raw`Command cheat-sheet (guidance only)
+Inspect workspace (depth=2)
+<list_children>
+  <parentPath>game.Workspace</parentPath>
+  <depth>2</depth>
+</list_children>
+
+Create model + floor/roof via run_command
+<run_command>
+  <command>create_model parent="game.Workspace" name="Hospital"</command>
+</run_command>
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="Floor" size=40,1,40 cframe=0,0.5,0 material=Concrete anchored=1</command>
+</run_command>
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="Roof" size=42,1,42 cframe=0,11,0 material=Slate anchored=1</command>
+</run_command>
+
+Walls (repeat with adjusted CFrame and Size)
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="WallFront" size=40,10,1 cframe=0,5.5,-19.5 material=Brick anchored=1</command>
+</run_command>
+
+Builder script (idempotent)
+<open_or_create_script>
+  <parentPath>game.ServerScriptService</parentPath>
+  <name>HospitalBuilder</name>
+</open_or_create_script>
+<show_diff>
+  <path>game.ServerScriptService.HospitalBuilder</path>
+  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"local Workspace = game:GetService('Workspace')\nlocal function ensureModel(name)\n\tlocal m = Workspace:FindFirstChild(name)\n\tif not m then\n\tm = Instance.new('Model')\n\tm.Name = name\n\tm.Parent = Workspace\n\tend\n\treturn m\nend\nlocal function ensurePart(parent, name, size, cf, mat)\n\tlocal p = parent:FindFirstChild(name)\n\tif not p then\n\tp = Instance.new('Part')\n\tp.Anchored = true\n\tp.Name = name\n\tp.Parent = parent\n\tend\n\tp.Size = size\n\tp.CFrame = cf\n\tif mat then p.Material = mat end\n\treturn p\nend\nlocal hospital = ensureModel('Hospital')\nensurePart(hospital, 'Floor', Vector3.new(40,1,40), CFrame.new(0,0.5,0), Enum.Material.Concrete)\nensurePart(hospital, 'WallFront', Vector3.new(40,10,1), CFrame.new(0,5.5,-19.5), Enum.Material.Brick)\nensurePart(hospital, 'WallBack', Vector3.new(40,10,1), CFrame.new(0,5.5,19.5), Enum.Material.Brick)\nensurePart(hospital, 'WallLeft', Vector3.new(1,10,40), CFrame.new(-19.5,5.5,0), Enum.Material.Brick)\nensurePart(hospital, 'WallRight', Vector3.new(1,10,40), CFrame.new(19.5,5.5,0), Enum.Material.Brick)\nensurePart(hospital, 'Roof', Vector3.new(42,1,42), CFrame.new(0,11,0), Enum.Material.Slate)\n"}]</edits>
+</show_diff>
+
+Catalog search + insert
+<search_assets>
+  <query>hospital bed</query>
+  <tags>["model","bed","hospital"]</tags>
+  <limit>6</limit>
+</search_assets>
+<run_command>
+  <command>insert_asset assetId=125013769 parent="game.Workspace.Hospital"</command>
+</run_command>
+
+Manual shell (copy block for Floor + 4 walls + roof)
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="WallBack" size=40,10,1 cframe=0,5.5,19.5 material=Brick anchored=1</command>
+</run_command>
+
+Helpers (lights, spawn, cleanup)
+<run_command>
+  <command>create_model parent="game.Workspace" name="LightingHelper"</command>
+</run_command>
+<open_or_create_script>
+  <parentPath>game.ServerScriptService</parentPath>
+  <name>ImportedCleanup</name>
+</open_or_create_script>
+<show_diff>
+  <path>game.ServerScriptService.ImportedCleanup</path>
+  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"local container = workspace:FindFirstChild('Hospital')\nif container then\n\tfor _, inst in ipairs(container:GetDescendants()) do\n\t\tif inst:IsA('Script') or inst:IsA('LocalScript') then\n\t\t\tinst:Destroy()\n\t\tend\n\tend\nend\n"}]</edits>
+</show_diff>`,
+  `Manual fallback (guidance only)
+- If the user asks for primitives or catalog searches fail, switch to run_command create_part + set_props and add an optional builder script.
+- You may still use catalog assets when the user permits or provides an assetId.`,
   String.raw`Examples (guidance only)
 <start_plan>
   <steps>["Create Hospital model","Add floor and four walls","Add roof","Write HospitalBuilder","Summarize"]</steps>
