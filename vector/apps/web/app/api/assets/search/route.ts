@@ -25,7 +25,7 @@ export async function GET(req: Request) {
   const tags = parseTags(searchParams)
   const logQuery = query.replace(/[\r\n\t]+/g, ' ').trim().slice(0, 80)
   const logTags = tags.map((t) => t.slice(0, 24)).join('|')
-  const limit = Math.max(1, Math.min(50, Number(searchParams.get('limit') || '8')))
+  const limit = Math.max(1, Math.min(60, Number(searchParams.get('limit') || '8')))
   const override = process.env.CATALOG_API_URL?.trim()
   const provider = !override || override.toLowerCase() === 'roblox' ? 'roblox' : 'proxy'
   const t0 = Date.now()
@@ -48,4 +48,3 @@ export async function GET(req: Request) {
     })
   }
 }
-

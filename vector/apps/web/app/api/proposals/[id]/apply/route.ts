@@ -45,6 +45,11 @@ export async function POST(req: Request, ctx: { params: { id: string } }) {
       const fallback = 'CATALOG_UNAVAILABLE Asset search/insert failed. Create the requested objects manually using create_instance/set_properties or Luau edits.'
       try { pushChunk(wf, 'fallback.asset manual_required') } catch (e) { console.error('Failed to push chunk for asset fallback', e) }
       updateTaskState(wf, (state) => {
+        if (!state.policy || typeof state.policy !== 'object') {
+          state.policy = { geometryOps: 0, luauEdits: 0, manualMode: true, assetSearches: 0, assetInserts: 0 }
+        } else {
+          state.policy.manualMode = true
+        }
         state.history.push({ role: 'system', content: fallback + (opKind ? ` op=${opKind}` : ''), at: Date.now() })
       })
     }
@@ -64,6 +69,25 @@ export async function POST(req: Request, ctx: { params: { id: string } }) {
       console.warn(
         `[proposals.apply] create_instance failed class=${className} parent=${parentPath} error=${body?.error || 'unknown'}`,
       )
+    }
+  }
+  // Log asset operations verbosely for terminal diagnostics
+  if (typeof (body as any)?.type === 'string' && (body as any).type === 'asset_op') {
+    const opKind = typeof (body as any)?.op === 'string' ? String((body as any).op) : 'unknown'
+    const ok = (body as any)?.ok === true
+    const assetId = (body as any)?.assetId
+    const parentPath = typeof (body as any)?.parentPath === 'string' ? String((body as any)?.parentPath) : undefined
+    const insertedPath = typeof (body as any)?.insertedPath === 'string' ? String((body as any)?.insertedPath) : undefined
+    const query = typeof (body as any)?.query === 'string' ? String((body as any)?.query) : undefined
+    const error = typeof (body as any)?.error === 'string' ? String((body as any)?.error) : undefined
+    const base = `[proposals.apply] asset_op op=${opKind}`
+      + (assetId != null ? ` id=${assetId}` : '')
+      + (parentPath ? ` parent=${parentPath}` : '')
+      + (query ? ` query="${query}"` : '')
+    if (ok) {
+      console.log(`${base} ok inserted=${insertedPath || 'n/a'}`)
+    } else {
+      console.warn(`${base} failed error=${error || 'unknown'}`)
     }
   }
   console.log(

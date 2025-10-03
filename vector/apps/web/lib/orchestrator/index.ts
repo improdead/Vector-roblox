@@ -132,6 +132,7 @@ import {
   getSceneProperties,
   applyObjectOpsPreview,
   hydrateSceneSnapshot,
+  normalizeInstancePath,
 } from './sceneGraph'
 
 type ProviderMode = 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
@@ -372,9 +373,10 @@ const PROMPT_SECTIONS = [
 - Attributes use "@Name" keys.
 - Edits are 0-based, non-overlapping, ≤20 edits and ≤2000 inserted chars.`,
   `Assets & 3D
-  - Prefer search_assets → insert_asset for props/models. Use create_instance only for simple primitive geometry or when catalog search fails/disabled.
+  - Manual-first when the user provides explicit dimensions/materials or forbids catalog usage. In these cases, do NOT use search_assets/insert_asset — build with create_instance/set_properties and author idempotent Luau.
+  - Use asset tools only when the user explicitly asks for catalog assets and no precise geometry was requested. If catalog search fails or is disabled, immediately fall back to manual geometry; do not retry search in a loop.
   - Composite scenes (e.g., park, plaza, town square): it is acceptable to add multiple distinct assets (e.g., trees, benches, fountain, lights) as separate search_assets → insert_asset steps in the plan. Keep it concise: 2–4 categories initially, each with limit ≤ 6.
-  - Single‑subject builds (e.g., hospital, watch tower): avoid adding unrelated props unless requested. If a container model (e.g., game.Workspace.Hospital) already exists, do not recreate it; prefer inserting exactly one primary asset (e.g., a hospital building) under a sensible child like "Imported", or add obviously missing interior kits/furnishings.
+  - Single‑subject builds (e.g., hospital, watch tower): avoid adding unrelated props unless requested. If a container model (e.g., game.Workspace.Hospital) already exists, do not recreate it; prefer manual parts under that model, or insert a single primary asset when the user asked for it.
   - In Auto mode (autoApply=true), prefer choosing a single best match and inserting it directly without listing. Do not insert multiples unless the user explicitly asks for more than one.
   - search_assets limit ≤ 6 unless the user asks. Include helpful tags.
   - insert_asset defaults parentPath to game.Workspace if unknown. Before creating or inserting, inspect existing children (list_children) and skip duplicates when names/roles already exist.`,
@@ -418,6 +420,99 @@ Insert an asset (preferred)
   <assetId>123456789</assetId>
   <parentPath>game.Workspace</parentPath>
 </insert_asset>
+
+End-to-end: Hospital (asset-first → manual fallback)
+<start_plan>
+  <steps>[
+    "List children of game.Workspace to inventory scene",
+    "Search assets query='hospital building' tags=['model','building','hospital'] limit=6",
+    "Insert best match under game.Workspace",
+    "If insert fails or unauthorized, create Model 'Hospital' and build geometry manually",
+    "Create 'Floor' 40x1x40 at y=0.5, Material Concrete",
+    "Create four brick walls: front/back 40x10x1 at z=±19.5, left/right 1x10x38 at x=±19.5",
+    "Create 'Roof' 42x1x42 at y=11, Material Slate",
+    "Open or create Script 'HospitalBuilder' in game.ServerScriptService",
+    "Show diff to add idempotent Luau that rebuilds the hospital"
+  ]</steps>
+</start_plan>
+
+<list_children>
+  <parentPath>game.Workspace</parentPath>
+  <depth>1</depth>
+</list_children>
+TOOL_RESULT list_children
+{"children":[{"path":"game.Workspace.Terrain","name":"Terrain","className":"Terrain"}]}
+
+<search_assets>
+  <query>hospital building</query>
+  <tags>["model","building","hospital"]</tags>
+  <limit>6</limit>
+</search_assets>
+TOOL_RESULT search_assets
+{"results":[{"id":123456,"name":"City Hospital","creator":"BuilderX","type":"Model"},{"id":234567,"name":"Hospital LowPoly","creator":"DevY","type":"Model"}]}
+
+<insert_asset>
+  <assetId>123456</assetId>
+  <parentPath>game.Workspace</parentPath>
+</insert_asset>
+TOOL_RESULT insert_asset
+{"ok":false,"op":"insert_asset","assetId":123456,"error":"User is not authorized to access Asset."}
+
+<create_instance>
+  <className>Model</className>
+  <parentPath>game.Workspace</parentPath>
+  <props>{"Name":"Hospital"}</props>
+</create_instance>
+
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.Hospital</parentPath>
+  <props>{"Name":"Floor","Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Concrete"},"Size":{"__t":"Vector3","x":40,"y":1,"z":40},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
+
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.Hospital</parentPath>
+  <props>{"Name":"WallFront","Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Brick"},"Size":{"__t":"Vector3","x":40,"y":10,"z":1},"CFrame":{"__t":"CFrame","comps":[0,5,-19.5, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
+
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.Hospital</parentPath>
+  <props>{"Name":"WallBack","Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Brick"},"Size":{"__t":"Vector3","x":40,"y":10,"z":1},"CFrame":{"__t":"CFrame","comps":[0,5,19.5, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
+
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.Hospital</parentPath>
+  <props>{"Name":"WallLeft","Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Brick"},"Size":{"__t":"Vector3","x":1,"y":10,"z":38},"CFrame":{"__t":"CFrame","comps":[-19.5,5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
+
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.Hospital</parentPath>
+  <props>{"Name":"WallRight","Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Brick"},"Size":{"__t":"Vector3","x":1,"y":10,"z":38},"CFrame":{"__t":"CFrame","comps":[19.5,5,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
+
+<create_instance>
+  <className>Part</className>
+  <parentPath>game.Workspace.Hospital</parentPath>
+  <props>{"Name":"Roof","Anchored":true,"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Slate"},"Size":{"__t":"Vector3","x":42,"y":1,"z":42},"CFrame":{"__t":"CFrame","comps":[0,11,0, 1,0,0, 0,1,0, 0,0,1]}}</props>
+</create_instance>
+
+<open_or_create_script>
+  <parentPath>game.ServerScriptService</parentPath>
+  <name>HospitalBuilder</name>
+</open_or_create_script>
+
+<show_diff>
+  <path>game.ServerScriptService.HospitalBuilder</path>
+  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"local Workspace = game:GetService('Workspace')\nlocal function ensureModel(name)\n\tlocal m = Workspace:FindFirstChild(name)\n\tif not m then m = Instance.new('Model'); m.Name = name; m.Parent = Workspace end\n\treturn m\nend\nlocal function ensurePart(parent, name, size, cf, material)\n\tlocal p = parent:FindFirstChild(name)\n\tif not p then p = Instance.new('Part'); p.Name = name; p.Anchored = true; p.Parent = parent end\n\tp.Size = size; p.CFrame = cf; if material then p.Material = material end\n\treturn p\nend\nlocal hospital = ensureModel('Hospital')\nensurePart(hospital, 'Floor', Vector3.new(40,1,40), CFrame.new(0,0.5,0), Enum.Material.Concrete)\nensurePart(hospital, 'WallFront', Vector3.new(40,10,1), CFrame.new(0,5,-19.5), Enum.Material.Brick)\nensurePart(hospital, 'WallBack', Vector3.new(40,10,1), CFrame.new(0,5,19.5), Enum.Material.Brick)\nensurePart(hospital, 'WallLeft', Vector3.new(1,10,38), CFrame.new(-19.5,5,0), Enum.Material.Brick)\nensurePart(hospital, 'WallRight', Vector3.new(1,10,38), CFrame.new(19.5,5,0), Enum.Material.Brick)\nensurePart(hospital, 'Roof', Vector3.new(42,1,42), CFrame.new(0,11,0), Enum.Material.Slate)\n"}]</edits>
+</show_diff>
+
+<complete>
+  <summary>Placed Hospital geometry (floor, 4 walls, roof) and added HospitalBuilder Luau for idempotent rebuild. Asset insert failed; manual fallback used.</summary>
+</complete>
 
 Build simple geometry (generic)
 <start_plan>
@@ -712,6 +807,10 @@ type MapToolExtras = {
   recordPlanUpdate?: (update: { completedStep?: string; nextStep?: string; notes?: string }) => void
   userOptedOut?: boolean
   geometryTracker?: { sawCreate: boolean; sawParts: boolean }
+  subjectNouns?: string[]
+  manualMode?: boolean
+  geometryCount?: number
+  luauCount?: number
 }
 
 type MapResult = { proposals: Proposal[]; missingContext?: string; contextResult?: any }
@@ -824,7 +923,41 @@ function mapToolToProposals(
     if (typeof (a as any).className === 'string' && parentPath) {
       const childClass = (a as any).className as string
       const childProps = (a as any).props as Record<string, unknown> | undefined
+      const manualMode = !!extras?.manualMode
+      const manualProgress = ((extras?.geometryCount ?? 0) > 0) || ((extras?.luauCount ?? 0) > 0)
       const ops: ObjectOp[] = []
+
+      if (manualMode && !manualProgress && childClass === 'Model') {
+        return { proposals, missingContext: 'Manual mode: create visible Parts (Floor/Wall/Roof) or add the builder script before making additional container Models.' }
+      }
+
+      if (manualMode && childClass === 'Model') {
+        const nameProp = childProps && typeof childProps.Name === 'string' ? String(childProps.Name).trim() : ''
+        const subjects = Array.isArray(extras?.subjectNouns) ? extras!.subjectNouns : []
+        const matchesSubject = nameProp && subjects.some((noun) => noun && nameProp.toLowerCase().includes(noun.toLowerCase()))
+        if (!matchesSubject) {
+          return { proposals, missingContext: 'Manual mode active: create anchored Parts or update existing geometry instead of generic container Models.' }
+        }
+      }
+
+      // Guard: keep names aligned to user nouns. Common pitfall: "House"/"SimpleHouse" for hospital tasks.
+      const wantsHospital = /\bhospital\b/i.test(msg) || (extras?.subjectNouns || []).some((s) => /\bhospital\b/i.test(s))
+      if (wantsHospital && childClass === 'Model' && childProps && typeof childProps.Name === 'string') {
+        const nm = String(childProps.Name)
+        if (/^simple\s*house$/i.test(nm) || /^house$/i.test(nm) || /^structure$/i.test(nm)) {
+          (a as any).props = { ...childProps, Name: 'Hospital' }
+        }
+      }
+      let normalizedParentPath = parentPath
+      if (wantsHospital && typeof normalizedParentPath === 'string') {
+        normalizedParentPath = normalizedParentPath
+          .replace(/(game\.)?Workspace\.SimpleHouse\b/i, 'game.Workspace.Hospital')
+          .replace(/(game\.)?Workspace\.House\b/i, 'game.Workspace.Hospital')
+          .replace(/(game\.)?Workspace\.Structure\b/i, 'game.Workspace.Hospital')
+          .replace(/^Workspace\.SimpleHouse\b/i, 'Workspace.Hospital')
+          .replace(/^Workspace\.House\b/i, 'Workspace.Hospital')
+          .replace(/^Workspace\.Structure\b/i, 'Workspace.Hospital')
+      }
 
       // Build known scene paths, with and without 'game.' prefix for services
       const nodes = Array.isArray(input.context.scene?.nodes) ? input.context.scene!.nodes! : []
@@ -838,35 +971,41 @@ function mapToolToProposals(
         if (SERVICE_PREFIXES.includes(head)) known.add(`game.${p}`)
       }
 
-      const looksLikeWorkspace = /^game\.Workspace(?:\.|$)/i.test(parentPath) || /^Workspace(?:\.|$)/.test(parentPath)
+      const looksLikeWorkspace = /^game\.Workspace(?:\.|$)/i.test(normalizedParentPath) || /^Workspace(?:\.|$)/.test(normalizedParentPath)
       if (looksLikeWorkspace) {
-        // Walk up and create missing ancestors as Models under Workspace
-        const chain: { parent: string; name: string }[] = []
-        let cur = parentPath
-        let guard = 0
-        while (cur && !known.has(cur) && guard++ < 10) {
-          const noGame = cur.replace(/^game\./, '')
-          if (known.has(noGame)) break
-          const split = splitInstancePath(cur)
-          const inferredParent = split.parentPath || 'game.Workspace'
-          const inferredName = split.name || 'Model'
-          if (/^game\.Workspace$/i.test(inferredParent) || /^Workspace$/i.test(inferredParent)) {
-            const normalizedParent = /^Workspace$/i.test(inferredParent) ? 'game.Workspace' : inferredParent
-            chain.push({ parent: normalizedParent, name: inferredName })
+        // Skip ancestor creation when targeting the root Workspace directly
+        if (!/^game\.Workspace$/i.test(normalizedParentPath) && !/^Workspace$/i.test(normalizedParentPath)) {
+          // Walk up and create missing ancestors (beyond Workspace) as Models under Workspace
+          const chain: { parent: string; name: string }[] = []
+          let cur = normalizedParentPath
+          let guard = 0
+          while (cur && !known.has(cur) && guard++ < 10) {
+            const noGame = cur.replace(/^game\./, '')
+            if (known.has(noGame)) break
+            const split = splitInstancePath(cur)
+            const inferredParent = split.parentPath || 'game.Workspace'
+            const inferredName = split.name || 'Model'
+            // Avoid generating bogus entries for the Workspace or 'game' segment
+            const isRootParent = /^game\.Workspace$/i.test(inferredParent) || /^Workspace$/i.test(inferredParent)
+            const isRootName = /^Workspace$/i.test(inferredName) || /^game$/i.test(inferredName)
+            if (isRootParent && !isRootName) {
+              const normalizedParent = /^Workspace$/i.test(inferredParent) ? 'game.Workspace' : inferredParent
+              chain.push({ parent: normalizedParent, name: inferredName })
+            }
+            if (!split.parentPath || /^game\.Workspace$/i.test(split.parentPath) || /^Workspace$/i.test(split.parentPath)) break
+            cur = split.parentPath
           }
-          if (!split.parentPath || /^game\.Workspace$/i.test(split.parentPath) || /^Workspace$/i.test(split.parentPath)) break
-          cur = split.parentPath
-        }
-        for (let i = chain.length - 1; i >= 0; i--) {
-          const seg = chain[i]
-          ops.push({ op: 'create_instance', className: 'Model', parentPath: seg.parent, props: { Name: seg.name } })
-          const createdPath = buildInstancePath(seg.parent.replace(/^game\./, ''), seg.name).replace(/^Workspace\./, 'Workspace.')
-          known.add(createdPath)
-          known.add(`game.${createdPath}`)
+          for (let i = chain.length - 1; i >= 0; i--) {
+            const seg = chain[i]
+            ops.push({ op: 'create_instance', className: 'Model', parentPath: seg.parent, props: { Name: seg.name } })
+            const createdPath = buildInstancePath(seg.parent.replace(/^game\./, ''), seg.name).replace(/^Workspace\./, 'Workspace.')
+            known.add(createdPath)
+            known.add(`game.${createdPath}`)
+          }
         }
       }
 
-      ops.push({ op: 'create_instance', className: childClass, parentPath, props: childProps })
+      ops.push({ op: 'create_instance', className: childClass, parentPath: normalizedParentPath, props: (a as any).props as any })
       proposals.push({ id: id('obj'), type: 'object_op', ops, notes: 'Parsed from create_instance' })
       if (extras?.geometryTracker) {
         extras.geometryTracker.sawCreate = true
@@ -980,11 +1119,37 @@ function mapToolToProposals(
       targetPath = buildInstancePath(parentPath, scriptName)
     }
 
-    const knownSource = targetPath ? extras?.getScriptSource?.(targetPath) : undefined
-    let created = false
-    let text = typeof knownSource === 'string' ? knownSource : ''
+    const normalizePath = (value?: string) => normalizeInstancePath(value) || undefined
+    const pathsEqual = (left?: string, right?: string): boolean => {
+      const normLeft = normalizePath(left)
+      const normRight = normalizePath(right)
+      if (!normLeft || !normRight) return false
+      if (normLeft === normRight) return true
+      const withGameLeft = normLeft.startsWith('game.') ? normLeft : `game.${normLeft}`
+      const withGameRight = normRight.startsWith('game.') ? normRight : `game.${normRight}`
+      if (withGameLeft === withGameRight) return true
+      const withoutGameLeft = normLeft.replace(/^game\./, '')
+      const withoutGameRight = normRight.replace(/^game\./, '')
+      return withoutGameLeft === withoutGameRight
+    }
 
-    if (targetPath && typeof knownSource !== 'string') {
+    const activeScript = input.context.activeScript
+    const knownSource = targetPath ? extras?.getScriptSource?.(targetPath) : undefined
+    let text: string | undefined = typeof knownSource === 'string' ? knownSource : undefined
+
+    if (text === undefined && activeScript && pathsEqual(activeScript.path, targetPath)) {
+      text = typeof activeScript.text === 'string' ? activeScript.text : ''
+    }
+
+    const sceneNodes = Array.isArray(input.context.scene?.nodes) ? input.context.scene!.nodes! : []
+    const scriptExistsInScene = !!targetPath && sceneNodes.some((node) => pathsEqual(node?.path, targetPath))
+
+    if (text === undefined && scriptExistsInScene) {
+      return { proposals, missingContext: `Need script Source for ${targetPath}. Open the script or call <get_active_script>.` }
+    }
+
+    let created = false
+    if (targetPath && text === undefined) {
       created = true
       text = ''
       const op: ObjectOp = {
@@ -999,10 +1164,13 @@ function mapToolToProposals(
         notes: 'Ensure script exists before editing.',
         ops: [op],
       })
+    }
+
+    if (targetPath && text !== undefined) {
       extras?.recordScriptSource?.(targetPath, text)
     }
 
-    return { proposals, contextResult: { path: targetPath, text, created } }
+    return { proposals, contextResult: { path: targetPath, text: text ?? '', created } }
   }
   if (name === 'complete') {
     const summary = typeof (a as any).summary === 'string' ? (a as any).summary : undefined
@@ -1100,17 +1268,14 @@ const SCRIPT_OPT_IN_PATTERNS = [
   /\bprovide\s+(?:the\s+)?script\b/i,
 ]
 
-const GEOMETRY_INTENT_PATTERNS = [
-  /\b(build|create|make|spawn|place|add|put|drop)\b[^.!?]{0,120}\b(house|building|structure|scene|environment|world|level|map|terrain|tower|bridge|park|city|village|room|base|farm|garden|landscape)\b/i,
-  /\bpopulate\b[^.!?]{0,120}\b(scene|world|environment)\b/i,
-  /\bdecorate\b[^.!?]{0,120}\b(scene|area|room)\b/i,
-]
+// Removed implicit geometry-intent opt-out: natural phrases like "build a hospital" should not disable scripting
+const GEOMETRY_INTENT_PATTERNS: RegExp[] = []
 
 function detectScriptOptPreference(text: string): boolean | null {
   if (!text) return null
   if (SCRIPT_OPT_OUT_PATTERNS.some((pat) => pat.test(text))) return true
   if (SCRIPT_OPT_IN_PATTERNS.some((pat) => pat.test(text))) return false
-  if (GEOMETRY_INTENT_PATTERNS.some((pat) => pat.test(text))) return true
+  // Do not infer opt-out from generic build verbs; prefer explicit user opt-in/opt-out
   return null
 }
 
@@ -1154,6 +1319,29 @@ function proposalTouchesGeometry(proposal: Proposal): boolean {
     if (proposal.insert) return true
     if (proposal.generate3d) return true
     return false
+  }
+  return false
+}
+
+function proposalCreatesVisibleGeometry(proposal: Proposal): boolean {
+  if (!proposal) return false
+  if (proposal.type === 'object_op') {
+    return proposal.ops.some((op) => {
+      if (op.op === 'create_instance') {
+        return PART_CLASS_NAMES.has(op.className)
+      }
+      if (op.op === 'set_properties') {
+        if (isLuauScriptPath(op.path) && hasLuauSource(op.props as Record<string, unknown> | undefined)) {
+          return false
+        }
+        const props = (op.props || {}) as Record<string, unknown>
+        return ['Size', 'CFrame', 'Anchored', 'Material', 'Position', 'Orientation'].some((key) => Object.prototype.hasOwnProperty.call(props, key))
+      }
+      return false
+    })
+  }
+  if (proposal.type === 'asset_op') {
+    return !!proposal.insert || !!proposal.generate3d
   }
   return false
 }
@@ -1218,6 +1406,20 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   const scriptSources: Record<string, string> = { ...(taskState.scriptSources || {}) }
+  // Infer stable subject nouns (e.g., "hospital") from prior user messages or plan steps
+  const subjectNouns: string[] = (() => {
+    const nouns = new Set<string>()
+    try {
+      const hist = Array.isArray(taskState.history) ? taskState.history : []
+      const histText = hist.map((h) => (h?.content || '')).join(' \n ')
+      if (/\bhospital\b/i.test(histText)) nouns.add('hospital')
+    } catch {}
+    try {
+      const steps = Array.isArray(taskState.plan?.steps) ? taskState.plan!.steps : []
+      if (steps.some((s) => /\bHospital\b/i.test(String(s)))) nouns.add('hospital')
+    } catch {}
+    return Array.from(nouns)
+  })()
   const normalizeScriptPath = (path?: string) => (path || '').trim()
   const getScriptSource = (path: string): string | undefined => {
     const key = normalizeScriptPath(path)
@@ -1237,7 +1439,24 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   const recordPlanStart = (steps: string[]) => {
-    const normalized = steps.map((s) => (typeof s === 'string' ? s.trim() : '')).filter((s) => s.length > 0)
+    const raw = steps.map((s) => (typeof s === 'string' ? s.trim() : '')).filter((s) => s.length > 0)
+    // Sanitize step names to avoid subject drift (e.g., "SimpleHouse" instead of requested "Hospital")
+    const normalized = raw.map((s) => {
+      let out = s
+      if ((subjectNouns || []).some((n) => /\bhospital\b/i.test(n))) {
+        out = out
+          .replace(/\bSimpleHouse\b/g, 'Hospital')
+          .replace(/\bHouse\b/g, 'Hospital')
+          .replace(/\bStructure\b/g, 'Hospital')
+      }
+      return out
+    })
+    const current = Array.isArray(taskState.plan?.steps) ? taskState.plan!.steps : []
+    const changed = JSON.stringify(current) !== JSON.stringify(normalized)
+    if (!changed) {
+      pushChunk(streamKey, 'plan.keep (no change)')
+      return
+    }
     updateState((state) => {
       state.plan = { steps: normalized, completed: [], currentIndex: 0 }
     })
@@ -1245,6 +1464,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   const recordPlanUpdate = (update: { completedStep?: string; nextStep?: string; notes?: string }) => {
+    let changed = false
     updateState((state) => {
       if (!state.plan) {
         state.plan = { steps: [], completed: [], currentIndex: 0 }
@@ -1255,19 +1475,22 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         if (idx >= 0 && !plan.completed.includes(update.completedStep)) {
           plan.completed.push(update.completedStep)
           plan.currentIndex = Math.min(idx + 1, plan.steps.length - 1)
+          changed = true
         }
       }
       if (update.nextStep) {
         const idx = plan.steps.findIndex((step) => step === update.nextStep)
-        if (idx >= 0) {
+        if (idx >= 0 && plan.currentIndex !== idx) {
           plan.currentIndex = idx
+          changed = true
         }
       }
-      if (typeof update.notes === 'string' && update.notes.trim().length > 0) {
+      if (typeof update.notes === 'string' && update.notes.trim().length > 0 && plan.notes !== update.notes.trim()) {
         plan.notes = update.notes.trim()
+        changed = true
       }
     })
-    pushChunk(streamKey, 'plan.update ' + JSON.stringify(update))
+    pushChunk(streamKey, changed ? ('plan.update ' + JSON.stringify(update)) : 'plan.keep (no material change)')
   }
 
   let userOptedOut = !!taskState.policy?.userOptedOut
@@ -1324,6 +1547,49 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     : ''
   const providerFirstMessage = attachments.length ? `${msg}\n\n[ATTACHMENTS]\n${attachmentSummary}` : msg
 
+  // Detect user or system instructions that force manual geometry mode
+  const saysNoAssets = (t?: string) => {
+    if (!t) return false
+    return /\b(?:do\s*not\s*(?:search|use|insert)[^\n]*?(?:assets|catalog)|no\s+assets|manual\s+geometry|primitives\s+only|no\s+catalog|avoid\s+assets|build\s+manually)\b/i.test(t)
+  }
+  const allowsAssets = (t?: string) => {
+    if (!t) return false
+    return /\b(?:allow|re\s*enable|use)\s+(?:the\s+)?(?:catalog|assets)|\bsearch\s+(?:the\s+)?catalog\b|\bresume\s+asset\s+search\b/i.test(t)
+  }
+  const userHistoryText = Array.isArray(taskState.history)
+    ? taskState.history.filter((h) => h.role === 'user').map((h) => h.content || '').join(' \n ')
+    : ''
+  const recentSystemText = Array.isArray(taskState.history)
+    ? taskState.history
+        .slice(Math.max(0, taskState.history.length - 12))
+        .filter((h) => h.role === 'system')
+        .map((h) => h.content || '')
+        .join(' \n ')
+    : ''
+  const fallbackManual = /CATALOG_UNAVAILABLE|manual\s+using\s+create_instance|manual_required/i.test(recentSystemText)
+  const currentPolicy = ensureScriptPolicy(taskState)
+  let manualModeActive = !!currentPolicy.manualMode
+  if (fallbackManual) manualModeActive = true
+  if (manualModeActive && allowsAssets(msg)) {
+    updateState((state) => {
+      const policy = ensureScriptPolicy(state)
+      policy.manualMode = false
+    })
+    manualModeActive = false
+  }
+  const manualDirect = saysNoAssets(msg) || saysNoAssets(userHistoryText)
+  const manualWanted = manualModeActive || manualDirect
+
+  if (manualWanted && !manualModeActive) {
+    updateState((state) => {
+      const policy = ensureScriptPolicy(state)
+      policy.manualMode = true
+    })
+    manualModeActive = true
+  }
+  let geometryCount = currentPolicy.geometryOps || 0
+  let luauCount = currentPolicy.luauEdits || 0
+
   const contextRequestLimit = 1
   let contextRequestsThisCall = 0
   let requestAdditionalContext: (reason: string) => boolean = () => false
@@ -1347,7 +1613,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
   let messages: { role: 'user' | 'assistant' | 'system'; content: string }[] | null = null
   let assetFallbackWarningSent = false
-  const catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
+  let catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
+  if (manualWanted) catalogSearchAvailable = false
   let scriptWarnings = 0
 
   const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState; tokenTotals: { in: number; out: number } } => {
@@ -1595,7 +1862,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
       const planReady = Array.isArray(taskState.plan?.steps) && (taskState.plan?.steps.length || 0) > 0
       const askMode = (input.mode || 'agent') === 'ask'
-      const requirePlan = (process.env.VECTOR_REQUIRE_PLAN || '0') === '1'
+      const envRequirePlan = process.env.VECTOR_REQUIRE_PLAN
+      // Default OFF: only require a plan when explicitly enabled via env.
+      const requirePlan = (typeof envRequirePlan === 'string' && envRequirePlan.trim().length > 0) ? (envRequirePlan === '1') : false
       const isContextOrNonActionTool = (
         toolName === 'start_plan' ||
         toolName === 'update_plan' ||
@@ -1613,6 +1882,38 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         toolName === 'search_files'
       )
       const isActionTool = !isContextOrNonActionTool
+
+      if (manualWanted && (toolName === 'search_assets' || toolName === 'insert_asset' || toolName === 'generate_asset_3d')) {
+        consecutiveValidationErrors++
+        const errMsg = 'MANUAL_MODE Active: use create_instance/set_properties or Luau; catalog tools are disabled until manual build is complete.'
+        pushChunk(streamKey, `error.validation ${toolName} manual_mode`)
+        console.warn(`[orch] manual_mode tool=${toolName}`)
+        convo.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'user', content: errMsg })
+        appendHistory('system', errMsg)
+        continue
+      }
+
+      // Allow duplicate start_plan: if steps are unchanged, no-op; otherwise replace (handled by recordPlanStart)
+      if (toolName === 'start_plan' && planReady) {
+        const incomingSteps = Array.isArray((a as any).steps)
+          ? (a as any).steps.map((s: any) => String(s || '').trim())
+          : []
+        const currentSteps = Array.isArray(taskState.plan?.steps)
+          ? taskState.plan!.steps.map((s) => String(s || '').trim())
+          : []
+        if (JSON.stringify(incomingSteps) !== JSON.stringify(currentSteps)) {
+          consecutiveValidationErrors++
+          const errMsg = 'PLAN_ACTIVE Use <update_plan> to adjust the existing plan instead of starting a new one.'
+          pushChunk(streamKey, `error.validation ${toolName} plan_active`)
+          console.warn(`[orch] plan.active tool=${toolName}`)
+          convo.push({ role: 'assistant', content: toolXml })
+          convo.push({ role: 'user', content: errMsg })
+          appendHistory('system', errMsg)
+          continue
+        }
+        pushChunk(streamKey, 'plan.duplicate allowed')
+      }
       if (!planReady && isActionTool && !askMode && requirePlan) {
         const errMsg = 'PLAN_REQUIRED Call <start_plan> with a step-by-step outline before taking actions.'
         pushChunk(streamKey, `error.validation ${String(name)} plan_required`)
@@ -1621,6 +1922,37 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         convo.push({ role: 'user', content: errMsg })
         appendHistory('system', errMsg)
         continue
+      }
+
+      // Record asset usage counters
+      if (toolName === 'search_assets') {
+        updateState((state) => { const p = ensureScriptPolicy(state); p.assetSearches = (p.assetSearches || 0) + 1 })
+      } else if (toolName === 'insert_asset') {
+        updateState((state) => { const p = ensureScriptPolicy(state); p.assetInserts = (p.assetInserts || 0) + 1 })
+      }
+
+      // Enforce asset-first: require at least one search_assets attempt before manual geometry (agent mode)
+      let assetFirst = (process.env.VECTOR_ASSET_FIRST || '1') === '1'
+      if (manualWanted) assetFirst = false
+      const isGeometryTool = (toolName === 'create_instance') || (toolName === 'set_properties' && (!isLuauScriptPath((a as any).path) || !hasLuauSource((a as any).props)))
+      // Detect recent catalog failures to allow manual fallback without re-searching
+      const recentHistory = taskState.history.slice(-12).map((h) => h.content || '')
+      const assetBlocked = recentHistory.some((line) =>
+        /CATALOG_UNAVAILABLE|Asset .* failed|User is not authorized to access Asset|Failed to find \".*\" in the marketplace!|search_insert_fallback|no_results/i.test(line)
+      )
+      if (assetFirst && !askMode && catalogSearchAvailable && isActionTool && isGeometryTool) {
+        const searches = (taskState.policy?.assetSearches || 0)
+        const userRequestedManual = /\b(?:manual\s+geometry|primitives\s+only|no\s+assets)\b/i.test(msg)
+        if (searches === 0 && !userRequestedManual && !assetBlocked) {
+          const errMsg = 'ASSET_FIRST Please search the Creator Store first using <search_assets> before using manual geometry.'
+          pushChunk(streamKey, 'error.validation asset_first_required')
+          console.warn(`[orch] asset.first.require tool=${toolName}`)
+          // Echo tool for visibility then nudge
+          convo.push({ role: 'assistant', content: toolXml })
+          convo.push({ role: 'user', content: errMsg })
+          appendHistory('system', errMsg)
+          continue
+        }
       }
 
   if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
@@ -1780,6 +2112,10 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         recordPlanUpdate,
         userOptedOut,
         geometryTracker,
+        subjectNouns,
+        manualMode: manualWanted,
+        geometryCount,
+        luauCount,
       })
 
       if (mapped.contextResult !== undefined) {
@@ -1809,6 +2145,17 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         name === 'attempt_completion' ||
         (name === 'message' && typeof (a as any).phase === 'string' && (a as any).phase.toLowerCase() === 'final')
 
+      if (manualWanted && !askMode && isFinalPhase && geometryCount === 0 && luauCount === 0) {
+        consecutiveValidationErrors++
+        const warn = 'MANUAL_MODE Manual mode is active. Create at least one anchored Part (e.g., floor/walls/roof) or add the HospitalBuilder Luau before finishing.'
+        pushChunk(streamKey, 'error.validation manual_mode_incomplete')
+        console.warn(`[orch] manual_mode.incomplete tool=${String(name)}`)
+        convo.push({ role: 'assistant', content: toolXml })
+        convo.push({ role: 'user', content: warn })
+        appendHistory('system', warn)
+        continue
+      }
+
       const scriptRequired = geometryWorkObserved && !scriptWorkObserved && !userOptedOut
       if (isFinalPhase && scriptRequired) {
         scriptWarnings += 1
@@ -1828,7 +2175,10 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         updateState((state) => {
           const policy = ensureScriptPolicy(state)
           if (touchesGeometry) {
-            policy.geometryOps += 1
+            const addsVisibleGeometry = mapped.proposals.some(proposalCreatesVisibleGeometry)
+            if (addsVisibleGeometry) {
+              policy.geometryOps += 1
+            }
           }
           if (touchesLuau) {
             policy.luauEdits += 1
@@ -1839,6 +2189,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
             }
           }
         })
+        const refreshedPolicy = ensureScriptPolicy(taskState)
+        geometryCount = refreshedPolicy.geometryOps || 0
+        luauCount = refreshedPolicy.luauEdits || 0
         pushChunk(streamKey, `proposals.mapped ${String(name)} count=${mapped.proposals.length}`)
         console.log(`[orch] proposals.mapped tool=${String(name)} count=${mapped.proposals.length}`)
         // Stream assistant text for UI transcript
@@ -1962,7 +2315,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     ])
   }
 
-  if (!fallbacksDisabled) {
+  if (fallbacksDisabled) {
     const errMsg = 'ASSET_FALLBACK_DISABLED Asset catalog fallback is disabled. Create the requested objects manually using create_instance or Luau edits.'
     pushChunk(streamKey, 'fallback.asset disabled')
     console.warn('[orch] fallback.asset disabled; no proposals after provider warning')

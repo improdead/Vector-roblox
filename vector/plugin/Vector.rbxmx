@@ -40,6 +40,18 @@ _G.__VECTOR_PROGRESS = _G.__VECTOR_PROGRESS or 0
 _G.__VECTOR_RUNS = _G.__VECTOR_RUNS or {}
 _G.__VECTOR_LAST_WORKFLOW_ID = _G.__VECTOR_LAST_WORKFLOW_ID or nil
 
+local FAILED_ASSET_IDS = _G.__VECTOR_FAILED_ASSET_IDS
+if type(FAILED_ASSET_IDS) ~= "table" then
+    FAILED_ASSET_IDS = {}
+    _G.__VECTOR_FAILED_ASSET_IDS = FAILED_ASSET_IDS
+end
+
+local GAME_CREATOR_ID = tonumber(game.CreatorId) or 0
+local GAME_CREATOR_TYPE = tostring(game.CreatorType)
+
+-- TEMP: Restrict to Roblox-owned assets only
+local ROBLOX_ONLY = false
+
 -- UI state (shared across UI and actions)
 local CURRENT_MODE = "agent" -- or "ask"
 
@@ -600,6 +612,15 @@ local function renderUnifiedDiff(container, oldText, newText)
 	container.CanvasSize = UDim2.new(0, 0, 0, container.UIListLayout.AbsoluteContentSize.Y + 8)
 end
 
+local function openScriptByPath(path)
+	local inst = resolveByFullName(path)
+	if inst then
+		pcall(function()
+			ScriptEditorService:OpenScript(inst)
+		end)
+	end
+end
+
 local function renderConflictDetails(container, files)
 	container:ClearAllChildren()
 	local layout = Instance.new("UIListLayout")
@@ -710,15 +731,6 @@ local function applyEditProposal(proposal)
 	return true, nil, results
 end
 
-local function openScriptByPath(path)
-	local inst = resolveByFullName(path)
-	if inst then
-		pcall(function()
-			ScriptEditorService:OpenScript(inst)
-		end)
-	end
-end
-
 local function getBackendBaseUrl()
     -- Prefer plugin setting if present, fallback to local dev server
     local val
@@ -780,7 +792,29 @@ local function fetchAssets(query, limit, tags)
 	if not ok then
 		return false, "Invalid JSON"
 	end
-	return true, json.results or {}
+	local raw = json.results or {}
+	local filtered = {}
+	for _, entry in ipairs(raw) do
+		local assetId = assetIdKey(entry and (entry.id or entry.assetId or entry.AssetId))
+		if assetId and assetId > 0 and assetId < 100000000000 then
+			local typeName = nil
+			if typeof(entry.type) == "string" then
+				typeName = string.lower(entry.type)
+			elseif typeof(entry.AssetType) == "string" then
+				typeName = string.lower(entry.AssetType)
+			elseif typeof(entry.assetType) == "string" then
+				typeName = string.lower(entry.assetType)
+			elseif typeof(entry.assetType) == "number" then
+				typeName = tostring(entry.assetType)
+			end
+			local isModelLike = typeName == nil or string.find(typeName, "model", 1, true) ~= nil or typeName == "8"
+			if isModelLike then
+				entry.id = assetId
+				table.insert(filtered, entry)
+			end
+		end
+	end
+	return true, filtered
 end
 
 local function checkpointsBaseUrl()
@@ -823,6 +857,123 @@ local function restoreCheckpointRequest(checkpointId, mode)
     return true, parsed.checkpoint
 end
 
+local function assetIdKey(assetId)
+    if typeof(assetId) == "number" then
+        return assetId
+    end
+    local asNumber = tonumber(assetId)
+    if typeof(asNumber) == "number" and asNumber == asNumber then
+        return asNumber
+    end
+    return nil
+end
+
+local function recordAssetFailure(assetId, message)
+    local key = assetIdKey(assetId)
+    if not key then return end
+    FAILED_ASSET_IDS[key] = message or true
+end
+
+local function clearAssetFailure(assetId)
+    local key = assetIdKey(assetId)
+    if not key then return end
+    FAILED_ASSET_IDS[key] = nil
+end
+
+local function isRobloxCreatorName(name)
+    if typeof(name) ~= "string" then return false end
+    local lower = string.lower(name)
+    return lower == "roblox" or lower == "roblox team" or lower == "roblox official" or string.sub(lower, 1, 7) == "roblox "
+end
+
+local function isRobloxEntry(entry)
+    local creatorName = (typeof(entry.creator) == "string" and entry.creator)
+        or (typeof(entry.CreatorName) == "string" and entry.CreatorName) or ""
+    local creatorId = assetIdKey(entry.creatorId or entry.CreatorId)
+    local creatorType
+    if typeof(entry.creatorType) == "string" then
+        creatorType = string.lower(entry.creatorType)
+    elseif typeof(entry.CreatorType) == "string" then
+        creatorType = string.lower(entry.CreatorType)
+    elseif typeof(entry.CreatorType) == "EnumItem" then
+        creatorType = string.lower(tostring(entry.CreatorType))
+    end
+    if creatorType then
+        local trimmed = string.match(creatorType, "([^.]+)$")
+        if trimmed then creatorType = trimmed end
+    end
+    if isRobloxCreatorName(creatorName) then return true end
+    if creatorId == 1 then return true end
+    if creatorType == "roblox" then return true end
+    return false
+end
+
+local function computeCatalogScore(entry, index)
+    local score = (index or 0) * 10
+    local creatorName = (typeof(entry.creator) == "string" and entry.creator) or (typeof(entry.CreatorName) == "string" and entry.CreatorName) or ""
+    local creatorId = assetIdKey(entry.creatorId or entry.CreatorId)
+    local creatorType
+    if typeof(entry.creatorType) == "string" then
+        creatorType = string.lower(entry.creatorType)
+    elseif typeof(entry.CreatorType) == "string" then
+        creatorType = string.lower(entry.CreatorType)
+    elseif typeof(entry.CreatorType) == "EnumItem" then
+        creatorType = string.lower(tostring(entry.CreatorType))
+    end
+    if creatorType then
+        local trimmed = string.match(creatorType, "([^.]+)$")
+        if trimmed then
+            creatorType = trimmed
+        end
+    end
+    local isVerified = entry.isVerified == true or entry.IsVerified == true or entry.creatorHasVerifiedBadge == true
+
+    local assetId = assetIdKey(entry.id or entry.AssetId)
+    if assetId and FAILED_ASSET_IDS[assetId] then
+        score += 100000
+    end
+
+    if isRobloxCreatorName(creatorName) or (creatorType == "roblox") or (creatorId == 1) then
+        score = score - 8000
+    end
+
+    if creatorId and creatorId == GAME_CREATOR_ID then
+        score = score - 6000
+    elseif GAME_CREATOR_TYPE == tostring(Enum.CreatorType.Group) and creatorType == "group" and creatorId == GAME_CREATOR_ID then
+        score = score - 4000
+    end
+
+    if isVerified then
+        score = score - 400
+    end
+
+    return score
+end
+
+local function sortCatalogResults(results)
+    local scored = {}
+    -- Optional strict Roblox-only filter
+    if ROBLOX_ONLY then
+        local filtered = {}
+        for _, e in ipairs(results) do
+            if isRobloxEntry(e) then table.insert(filtered, e) end
+        end
+        results = filtered
+    end
+    for index, entry in ipairs(results) do
+        table.insert(scored, { entry = entry, score = computeCatalogScore(entry, index) })
+    end
+    table.sort(scored, function(a, b)
+        if a.score == b.score then return (a.entry.id or a.entry.AssetId or 0) < (b.entry.id or b.entry.AssetId or 0) end
+        return a.score < b.score
+    end)
+    local ordered = {}
+    for _, info in ipairs(scored) do
+        table.insert(ordered, info.entry)
+    end
+    return ordered
+end
+
 local function insertAsset(assetId, parentPath)
 	local parent = workspace
 	if parentPath then
@@ -831,19 +982,168 @@ local function insertAsset(assetId, parentPath)
 			parent = resolved
 		end
 	end
+    local key = assetIdKey(assetId)
+    if not key then
+        return false, "invalid_asset_id"
+    end
+    if FAILED_ASSET_IDS[key] then
+        return false, FAILED_ASSET_IDS[key]
+    end
 	local ok, modelOrErr = pcall(function()
 		local container = InsertService:LoadAsset(assetId)
 		if not container then error("LoadAsset returned nil") end
 		local model = container:FindFirstChildOfClass("Model") or container
 		model.Parent = parent
-		-- If the container is different from the inserted model, clean it up
 		if container ~= model then pcall(function() container:Destroy() end) end
 		return model
 	end)
 	if not ok then
+        recordAssetFailure(assetId, tostring(modelOrErr))
 		return false, modelOrErr
 	end
+    clearAssetFailure(assetId)
 	return true, modelOrErr
+end
+
+local function insertAssetFromFreeModels(query, parentPath, relativePosition, opts)
+	if typeof(query) ~= "string" or #query == 0 then
+		return false, "invalid_query"
+	end
+	local parent = workspace
+	if parentPath then
+		local resolved = resolveByFullName(parentPath)
+		if resolved and resolved:IsA("Instance") then
+			parent = resolved
+		end
+	end
+	local cam = workspace.CurrentCamera
+	local origin = cam and cam.CFrame and cam.CFrame.Position or Vector3.new()
+	local offset
+	if typeof(relativePosition) == "Vector3" then
+		offset = relativePosition
+	elseif cam and cam.CFrame then
+		offset = cam.CFrame.LookVector * 16
+	else
+		offset = Vector3.new()
+	end
+
+    local maxPages = 5 -- broaden search depth to improve odds
+    if opts and typeof(opts.maxPages) == "number" then
+        maxPages = math.clamp(math.floor(opts.maxPages), 1, 10)
+    end
+
+    local candidates = {}
+    local seenAsset = {}
+    for pageIndex = 0, maxPages - 1 do
+        local okPage, pages = pcall(function()
+            return InsertService:GetFreeModels(query, pageIndex)
+        end)
+        if okPage then
+            local page = (pages or {})[1]
+            if page and typeof(page) == "table" and typeof(page.Results) == "table" then
+                for resultIndex, entry in ipairs(page.Results) do
+                    local assetId = entry and assetIdKey(entry.AssetId)
+                    if assetId and not seenAsset[assetId] then
+                        if ROBLOX_ONLY and not isRobloxEntry(entry) then
+                            -- skip non-Roblox entries when filter is active
+                        else
+                        seenAsset[assetId] = true
+                        entry.__score = computeCatalogScore(entry, pageIndex * 100 + resultIndex)
+                        entry.__pageIndex = pageIndex
+                        entry.__resultIndex = resultIndex
+                        table.insert(candidates, entry)
+                        end
+                    end
+                end
+            end
+        else
+            warn(string.format("[Vector] GetFreeModels failed page=%d err=%s", pageIndex, tostring(pages)))
+        end
+    end
+
+    if #candidates == 0 then
+        local trimmed = tostring(query or ""):gsub("^%s+", ""):gsub("%s+$", "")
+        local first = string.match(trimmed, "^([^%s]+)")
+        if first and string.lower(first) ~= string.lower(trimmed) then
+            -- Broaden by retrying with the first word (e.g., "hospital" from "hospital building")
+            for pageIndex = 0, maxPages - 1 do
+                local okPage2, pages2 = pcall(function()
+                    return InsertService:GetFreeModels(first, pageIndex)
+                end)
+                if okPage2 then
+                    local page2 = (pages2 or {})[1]
+                    if page2 and typeof(page2) == "table" and typeof(page2.Results) == "table" then
+                        for resultIndex, entry in ipairs(page2.Results) do
+                            local assetId = entry and assetIdKey(entry.AssetId)
+                            if assetId and not seenAsset[assetId] then
+                                if ROBLOX_ONLY and not isRobloxEntry(entry) then
+                                    -- skip
+                                else
+                                    seenAsset[assetId] = true
+                                    entry.__score = computeCatalogScore(entry, pageIndex * 100 + resultIndex)
+                                    entry.__pageIndex = pageIndex
+                                    entry.__resultIndex = resultIndex
+                                    table.insert(candidates, entry)
+                                end
+                            end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    if #candidates == 0 then
+        local msg = string.format("Failed to find \"%s\" in the marketplace!", query)
+        warn(msg)
+        return false, msg
+    end
+
+    table.sort(candidates, function(a, b)
+        local scoreA = a.__score or 0
+        local scoreB = b.__score or 0
+        if scoreA == scoreB then
+            return (assetIdKey(a.AssetId) or 0) < (assetIdKey(b.AssetId) or 0)
+        end
+        return scoreA < scoreB
+    end)
+
+	local lastErr = nil
+	for _, entry in ipairs(candidates) do
+		local assetId = entry and assetIdKey(entry.AssetId)
+		if assetId and not FAILED_ASSET_IDS[assetId] then
+			local okLoad, container = pcall(function()
+				return InsertService:LoadAsset(assetId)
+			end)
+			if okLoad and container then
+				local model = container:FindFirstChildWhichIsA("Model") or container
+				pcall(function()
+					if typeof(entry.Name) == "string" and #entry.Name > 0 then
+						model.Name = entry.Name
+					else
+						model.Name = query
+					end
+				end)
+				model.Parent = parent
+				pcall(function()
+					local target = origin + offset
+					model:PivotTo(CFrame.new(target))
+				end)
+				if container ~= model then pcall(function() container:Destroy() end) end
+                clearAssetFailure(assetId)
+				return true, model, assetId
+			else
+				local errText = okLoad and "load_failed" or container
+				lastErr = errText
+                recordAssetFailure(assetId, tostring(errText))
+			end
+		else
+			lastErr = lastErr or "cached_failure"
+		end
+	end
+	local errMsg = lastErr and tostring(lastErr) or string.format("No insertable free model found for \"%s\"", query)
+	warn(errMsg)
+	return false, errMsg
 end
 
 local function buildUI(gui)
@@ -1700,13 +2000,19 @@ local function buildUI(gui)
     return ui
 end
 
-local function renderAssetResults(container, p, results) 
+    local function renderAssetResults(container, p, results) 
 	container:ClearAllChildren()
+	local ordered = {}
+	if type(results) == "table" then
+		ordered = sortCatalogResults(results)
+	else
+		ordered = results
+	end
 	local layout = Instance.new("UIListLayout")
 	layout.SortOrder = Enum.SortOrder.LayoutOrder
 	layout.Padding = UDim.new(0, 4)
 	layout.Parent = container
-	for i, r in ipairs(results) do
+	for i, r in ipairs(ordered) do
 		local row = Instance.new("Frame")
 		row.Size = UDim2.new(1, -8, 0, 28)
 		row.BackgroundTransparency = 0.4
@@ -1740,18 +2046,41 @@ local function renderAssetResults(container, p, results)
 		insertBtn.ZIndex = 2
 		insertBtn.Parent = row
 
-		insertBtn.MouseButton1Click:Connect(function()
-			local ok, modelOrErr = insertAsset(r.id, p.insert and p.insert.parentPath or nil)
-			if ok then
-				row.BackgroundColor3 = Color3.fromRGB(32, 64, 32)
-				row.BackgroundTransparency = 0.2
-				reportApply(p.id, { ok = true, type = p.type, op = "insert_asset", assetId = r.id, insertedPath = modelOrErr:GetFullName() })
-			else
-				row.BackgroundColor3 = Color3.fromRGB(64, 32, 32)
-				row.BackgroundTransparency = 0.2
-				reportApply(p.id, { ok = false, type = p.type, op = "insert_asset", assetId = r.id, error = tostring(modelOrErr) })
-			end
-		end)
+        insertBtn.MouseButton1Click:Connect(function()
+            -- Try this result first, then fall back to trying others in order until one inserts
+            local function tryInsert(id)
+                local ok, modelOrErr = insertAsset(id, p.insert and p.insert.parentPath or nil)
+                if ok then
+                    local insertedPath = nil
+                    if modelOrErr and typeof(modelOrErr) == "Instance" and modelOrErr.GetFullName then
+                        local success, value = pcall(function() return modelOrErr:GetFullName() end)
+                        insertedPath = success and value or nil
+                    end
+                    return true, insertedPath
+                end
+                return false, tostring(modelOrErr)
+            end
+
+            local ok, insertedPath = tryInsert(r.id)
+            if not ok then
+                for _, alt in ipairs(ordered) do
+                    if alt.id ~= r.id then
+                        ok, insertedPath = tryInsert(alt.id)
+                        if ok then break end
+                    end
+                end
+            end
+
+            if ok then
+                row.BackgroundColor3 = Color3.fromRGB(32, 64, 32)
+                row.BackgroundTransparency = 0.2
+                reportApply(p.id, { ok = true, type = p.type, op = "insert_asset", assetId = r.id, insertedPath = insertedPath })
+            else
+                row.BackgroundColor3 = Color3.fromRGB(64, 32, 32)
+                row.BackgroundTransparency = 0.2
+                reportApply(p.id, { ok = false, type = p.type, op = "insert_asset", assetId = r.id, error = insertedPath })
+            end
+        end)
 	end
 end
 
@@ -2302,31 +2631,42 @@ local function toggleDock()
 				end
 			elseif p.search then
 				-- Auto-mode: run a single search, insert the best match under a sensible parent
-				if _G.__VECTOR_AUTO then
-					local query = p.search.query or ""
-					ui.addStatus("auto.asset_search " .. tostring(query))
-					local okFetch, resultsOrErr = fetchAssets(query, p.search.limit or 6, p.search.tags)
-					if okFetch and type(resultsOrErr) == "table" then
-						if #resultsOrErr > 0 then
-							local first = resultsOrErr[1]
-							local assetId = tonumber(first and first.id)
+            if _G.__VECTOR_AUTO then
+                    local query = p.search.query or ""
+                    ui.addStatus("auto.asset_search " .. tostring(query))
+                    if ROBLOX_ONLY then ui.addStatus("asset.filter roblox_only") end
+                    -- Fetch a broader candidate set from backend; we will filter/order locally
+                    local desiredLimit = tonumber(p.search.limit) or 0
+                    local fetchLimit = math.max(60, desiredLimit, 0)
+                    local okFetch, resultsOrErr = fetchAssets(query, fetchLimit, p.search.tags)
+                    if okFetch and type(resultsOrErr) == "table" then
+                        local orderedResults = sortCatalogResults(resultsOrErr)
+						local desiredParentPath = nil
+						local sel = Selection:Get()
+						if type(sel) == "table" and #sel == 1 and sel[1] and sel[1].GetFullName then
+							local okPath, pathOrErr = pcall(function() return sel[1]:GetFullName() end)
+							if okPath and type(pathOrErr) == "string" then desiredParentPath = pathOrErr end
+						end
+						if not desiredParentPath then
+							local hosp = workspace:FindFirstChild("Hospital")
+							if hosp and hosp.GetFullName then
+								local okPath, pathOrErr = pcall(function() return hosp:GetFullName() end)
+								if okPath and type(pathOrErr) == "string" then desiredParentPath = pathOrErr end
+							end
+						end
+
+						ensurePermissionWithStatus()
+						local lastErr = nil
+						local inserted = false
+						for _, entry in ipairs(orderedResults) do
+							local assetId = tonumber(entry and entry.id)
 							if assetId then
-								-- Choose a default parent: selected container → Workspace.Hospital → Workspace
-								local desiredParentPath = nil
-								local sel = Selection:Get()
-								if type(sel) == "table" and #sel == 1 and sel[1] and sel[1].GetFullName then
-									local okPath, pathOrErr = pcall(function() return sel[1]:GetFullName() end)
-									if okPath and type(pathOrErr) == "string" then desiredParentPath = pathOrErr end
-								end
-								if not desiredParentPath then
-									local hosp = workspace:FindFirstChild("Hospital")
-									if hosp and hosp.GetFullName then
-										local okPath, pathOrErr = pcall(function() return hosp:GetFullName() end)
-										if okPath and type(pathOrErr) == "string" then desiredParentPath = pathOrErr end
-									end
+								if FAILED_ASSET_IDS[assetId] then
+									ui.addStatus("auto.asset_search skip cached " .. tostring(assetId))
+									lastErr = FAILED_ASSET_IDS[assetId]
+									continue
 								end
 								ui.addStatus("auto.asset_search insert " .. tostring(assetId) .. (desiredParentPath and (" → " .. desiredParentPath) or ""))
-								ensurePermissionWithStatus()
 								local okInsert, modelOrErr = insertAsset(assetId, desiredParentPath)
 								if okInsert then
 									_G.__VECTOR_LAST_ASSET_ERROR = nil
@@ -2340,20 +2680,42 @@ local function toggleDock()
 									return true
 								else
 									local errMsg = tostring(modelOrErr)
+									lastErr = errMsg
 									_G.__VECTOR_LAST_ASSET_ERROR = errMsg or "insert_failed"
 									ui.addStatus("auto.err asset " .. errMsg)
 									reportApply(p.id, { ok = false, type = p.type, op = "search_insert", assetId = assetId, query = query, parentPath = desiredParentPath, error = errMsg })
 								end
-							else
-								ui.addStatus("auto.err asset invalid id")
-								_G.__VECTOR_LAST_ASSET_ERROR = "invalid_asset_id"
-								reportApply(p.id, { ok = false, type = p.type, op = "search_insert", query = query, error = "invalid_asset_id" })
 							end
-						else
-							ui.addStatus("auto.asset_search none")
-							_G.__VECTOR_LAST_ASSET_ERROR = "no_results"
-							reportApply(p.id, { ok = false, type = p.type, op = "search", query = query, error = "no_results" })
 						end
+
+						if not inserted and typeof(query) == "string" and #query > 0 then
+							ui.addStatus("auto.asset_search fallback free model")
+							local okFallback, modelOrErr, fallbackAssetId = insertAssetFromFreeModels(query, desiredParentPath, nil, { maxPages = 3 })
+							if okFallback then
+								_G.__VECTOR_LAST_ASSET_ERROR = nil
+								local insertedPath = nil
+								if modelOrErr and typeof(modelOrErr) == "Instance" and modelOrErr.GetFullName then
+									local success, value = pcall(function() return modelOrErr:GetFullName() end)
+									insertedPath = success and value or nil
+								end
+								ui.addStatus("auto.ok asset (fallback)")
+								reportApply(p.id, { ok = true, type = p.type, op = "search_insert_fallback", assetId = fallbackAssetId, insertedPath = insertedPath, query = query, parentPath = desiredParentPath })
+								return true
+							else
+								local errMsg = tostring(modelOrErr)
+								lastErr = lastErr or errMsg
+								_G.__VECTOR_LAST_ASSET_ERROR = errMsg or "insert_failed"
+								ui.addStatus("auto.err asset " .. errMsg)
+								reportApply(p.id, { ok = false, type = p.type, op = "search_insert_fallback", query = query, parentPath = desiredParentPath, error = errMsg })
+							end
+						end
+
+						if lastErr then
+							return false
+						end
+						ui.addStatus("auto.asset_search none")
+						_G.__VECTOR_LAST_ASSET_ERROR = "no_results"
+						reportApply(p.id, { ok = false, type = p.type, op = "search", query = query, error = "no_results" })
 					else
 						local errMsg = typeof(resultsOrErr) == "string" and resultsOrErr or "fetch_failed"
 						_G.__VECTOR_LAST_ASSET_ERROR = errMsg or "fetch_failed"
@@ -2982,6 +3344,14 @@ return function(className, parentPath, props)
     end
     local startedRecording = ChangeHistoryService:TryBeginRecording("Vector Create", "Vector Create")
     local ok, res = pcall(function()
+        -- Idempotency: if a child with the target Name and class already exists, reuse it
+        local desiredName = type(props) == "table" and props.Name
+        if type(desiredName) == "string" and #desiredName > 0 then
+            local existing = parent:FindFirstChild(desiredName)
+            if existing and existing.ClassName == className then
+                return existing:GetFullName()
+            end
+        end
         local inst = Instance.new(className)
         if type(props) == "table" then
             for k, v in pairs(props) do

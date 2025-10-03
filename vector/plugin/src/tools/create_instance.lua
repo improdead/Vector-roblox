@@ -114,6 +114,14 @@ return function(className, parentPath, props)
     end
     local startedRecording = ChangeHistoryService:TryBeginRecording("Vector Create", "Vector Create")
     local ok, res = pcall(function()
+        -- Idempotency: if a child with the target Name and class already exists, reuse it
+        local desiredName = type(props) == "table" and props.Name
+        if type(desiredName) == "string" and #desiredName > 0 then
+            local existing = parent:FindFirstChild(desiredName)
+            if existing and existing.ClassName == className then
+                return existing:GetFullName()
+            end
+        end
         local inst = Instance.new(className)
         if type(props) == "table" then
             for k, v in pairs(props) do

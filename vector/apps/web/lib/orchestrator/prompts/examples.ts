@@ -3,6 +3,7 @@
 
 export const PLANNER_GUIDE = `
 Planning
+- Always begin by returning exactly one <start_plan> and then stop. Do not perform any action tools until the user approves (e.g., they say "proceed" or "next step").
 - Translate the user's goal into specific placements and code changes.
 - When planning, produce a DETAILED, TOOL-ORIENTED step list via <start_plan>.
   - 8–15 concise steps typical for multi‑object builds; more if needed.
@@ -10,10 +11,18 @@ Planning
     - The tool name (create_instance, set_properties, search_assets, insert_asset, open_or_create_script, show_diff, ...)
     - The exact target (className, path/parentPath, and Name)
     - The intention (e.g., size/position, purpose like "outer fence", or code outcome)
-  - Examples of good step text: "Create Model 'MilitaryBase' under game.Workspace", "Search assets: query='watch tower' tags=['model'] limit=6", "Insert asset 123456789 under game.Workspace.MilitaryBase", "Set CFrame/Anchored for 'Gate' at (0,0,50)", "Open or create Script 'BaseBuilder' in ServerScriptService", "Show diff to insert idempotent Luau that rebuilds placed structures".
-- Prefer assets first: plan searches and inserts before manual geometry. Use create_instance for primitives or when search/insert is unavailable.
+  - Examples of good step text: "Search assets: query='hospital building' tags=['model','building','hospital'] limit=6", "Insert asset <ID> under game.Workspace", "Set CFrame/Anchored for placement".
+Manual-first when the user provides explicit dimensions/materials or forbids catalog usage. In these cases, do NOT use search_assets/insert_asset — build with create_instance/set_properties and author idempotent Luau.
+- When catalog access is denied or fails, immediately switch to manual geometry; do not keep calling search_assets or insert_asset.
+- Do NOT introduce generic example containers like "House" or "SimpleHouse". If the user asks for a "Hospital", keep all names and steps aligned to "Hospital".
+- By default, insert assets under game.Workspace directly. Do not create a container Model first unless the user explicitly requested one or multiple inserts require grouping.
+- Before searching, quickly inventory context:
+  - list_code_definition_names (brief) to understand existing code modules
+  - optionally list_children on game.Workspace to avoid duplicating obvious containers
+Use create_instance/set_properties for primitives whenever assets are unavailable/disabled OR the user specifies exact sizes/positions/materials. Only use asset tools if the user explicitly asks for catalog assets.
+- After the plan is approved, execute exactly one step per assistant turn.
 - Use <update_plan> as you progress (mark completed, set next, add notes). Keep steps small and verifiable.
-- Always add a Luau step (unless user opted out) to rebuild what was created.
+- Add a Luau step only when the user asks for code, or when assets are unavailable and you fall back to manual geometry (to make the build reproducible).
 `;
 
 export const COMPLEXITY_DECISION_GUIDE = `
@@ -62,8 +71,10 @@ Examples policy
 - Choose an example pattern only if it matches the current user goal; otherwise proceed without one.
 - Never introduce unrelated names or content from examples (e.g., do not create \"Farm\" or \"FarmBuilder\" when the user asked for a house).
 - Keep examples as text-only guidance. Always prioritize the user's request and the current scene/context.
- - Strictly follow the user's requested subject and nouns. Do not pivot to different subjects or example names. If the user asks for a "hospital", do not create a "house", "base", or any unrelated structure.
- - When continuing a plan, prefer steps that explicitly progress the user's requested build; avoid switching to generic examples.
+ - STRICTLY FOLLOW the user's requested subject and nouns. NEVER pivot to different subjects or example names. If the user asks for a "hospital", do NOT create a "house", "base", "SimpleHouse", or any unrelated structure.
+ - When continuing a plan, prefer steps that explicitly progress the user's requested build; avoid switching to generic examples or renaming containers.
+ - If the user forbids catalog assets (e.g., "do not search or insert catalog assets", "no assets", "manual geometry"), asset tools are disabled for this task. Build manually and write idempotent Luau.
+ - After an asset search/insert failure, assume manual geometry mode until the user explicitly allows assets again.
 `;
 
 export const WORKFLOW_EXAMPLES = `
