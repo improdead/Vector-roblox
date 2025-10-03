@@ -350,6 +350,7 @@ const PROMPT_SECTIONS = [
   `You are Vector, a Roblox Studio copilot.`,
   `Core rules
 - One tool per turn: emit EXACTLY ONE tool tag. It must be the last output (ignoring trailing whitespace). Wait for the tool result before continuing.
+- Prefer run_command for actions (create/modify/insert). Keep list_children for context and start_plan/update_plan to outline work.
 - Proposal-first and undoable: never change code/Instances outside a tool; keep each step small and reviewable.
 - Plan when work spans multiple steps. For a single obvious action you may act without <start_plan>.
 - Keep responses to that single tool tag (no markdown or invented tags). Optional brief explanatory text may appear before the tag when allowed.` ,
@@ -367,6 +368,14 @@ const PROMPT_SECTIONS = [
 - JSON goes inside the tag as strict JSON (double quotes, no trailing commas).
 - For show_diff/apply_edit the <edits> tag MUST contain a JSON array of edit objects (example: [{"start":{...},"end":{...},"text":"..."}]); never pass a plain string.
 - For show_diff/apply_edit when using <files>, every files[i].edits must also be that same JSON array (no strings, no code fences).`,
+  `Command mode
+- Use <run_command><command>...</command></run_command> for actions.
+- Examples:
+  - create_model parent="game.Workspace" name="Hospital"
+  - create_part parent="game.Workspace.Hospital" name="Floor" size=40,1,40 cframe=0,0.5,0 material=Concrete anchored=1
+  - set_props path="game.Workspace.Hospital.Floor" Anchored=1 size=40,1,40
+  - insert_asset assetId=123456 parent="game.Workspace"
+- Keep <list_children>, <start_plan>, and <update_plan> for context and planning.`,
   `Encoding & hygiene
 - Strings/numbers are literal. JSON must not be wrapped in quotes or code fences.
 - Paths use GetFullName() with brackets for special characters.
@@ -826,6 +835,133 @@ function mapToolToProposals(
   const ensurePath = (fallback?: string | null): string | undefined => {
     const p = typeof a.path === 'string' ? a.path : undefined
     return p || (fallback || undefined)
+  }
+  if (name === 'run_command') {
+    const cmdRaw = typeof (a as any).command === 'string' ? (a as any).command.trim() : ''
+    if (!cmdRaw) return { proposals, missingContext: 'Provide a command string.' }
+    const parseKV = (s: string): Record<string, string> => {
+      const out: Record<string, string> = {}
+      const re = /(\w+)=(("[^"]*")|('[^']*')|([^\s]+))/g
+      let m: RegExpExecArray | null
+      while ((m = re.exec(s))) {
+        const key = String(m[1])
+        let val = String(m[2])
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1)
+        }
+        out[key] = val
+      }
+      return out
+    }
+    const toBool = (v?: string) => {
+      if (!v) return undefined
+      const t = v.toLowerCase()
+      if (t === '1' || t === 'true' || t === 'yes' || t === 'on') return true
+      if (t === '0' || t === 'false' || t === 'no' || t === 'off') return false
+      return undefined
+    }
+    const parseVec3 = (v?: string) => {
+      if (!v) return undefined
+      const parts = v.replace(/[xX]/g, ',').split(/[,\s]+/).filter(Boolean)
+      if (parts.length < 3) return undefined
+      const nums = parts.slice(0, 3).map((p) => Number(p))
+      if (nums.some((n) => !Number.isFinite(n))) return undefined
+      return { __t: 'Vector3', x: nums[0], y: nums[1], z: nums[2] }
+    }
+    const parseColor3 = (v?: string) => {
+      if (!v) return undefined
+      const parts = v.split(/[,\s]+/).filter(Boolean)
+      if (parts.length < 3) return undefined
+      const nums = parts.slice(0, 3).map((p) => Number(p))
+      if (nums.some((n) => !Number.isFinite(n))) return undefined
+      return { __t: 'Color3', r: nums[0], g: nums[1], b: nums[2] }
+    }
+    const parseCFrame = (v?: string) => {
+      if (!v) return undefined
+      const parts = v.split(/[,\s]+/).filter(Boolean).map((p) => Number(p))
+      if (parts.some((n) => !Number.isFinite(n))) return undefined
+      if (parts.length >= 12) return { __t: 'CFrame', comps: parts.slice(0, 12) }
+      if (parts.length >= 3) return { __t: 'CFrame', comps: [parts[0], parts[1], parts[2], 1,0,0, 0,1,0, 0,0,1] }
+      return undefined
+    }
+    const parseMaterial = (v?: string) => {
+      if (!v) return undefined
+      const name = v.trim()
+      if (!name) return undefined
+      return { __t: 'EnumItem', enum: 'Enum.Material', name }
+    }
+    const [verbRaw, ...rest] = cmdRaw.split(/\s+/)
+    const verb = (verbRaw || '').toLowerCase()
+    const argsLine = rest.join(' ')
+    const kv = parseKV(argsLine)
+    const addObjectOp = (op: ObjectOp) => {
+      proposals.push({ id: id('obj'), type: 'object_op', ops: [op], notes: `Parsed from run_command: ${verb}` })
+    }
+    const addAssetOp = (insert?: { assetId: number; parentPath?: string }) => {
+      if (!insert) return
+      if (extras?.manualMode) return
+      proposals.push({ id: id('asset'), type: 'asset_op', insert, search: undefined, generate3d: undefined, meta: {} as any })
+    }
+    if (verb === 'create_model') {
+      const parentPath = kv.parent || kv.parentPath || 'game.Workspace'
+      const name = kv.name || 'Model'
+      addObjectOp({ op: 'create_instance', className: 'Model', parentPath, props: { Name: name } })
+      return { proposals }
+    }
+    if (verb === 'create_part') {
+      const parentPath = kv.parent || kv.parentPath || 'game.Workspace'
+      const name = kv.name || 'Part'
+      const size = parseVec3(kv.size)
+      const cf = parseCFrame(kv.cframe || kv.cf || kv.position)
+      const mat = parseMaterial(kv.material)
+      const anchored = toBool(kv.anchored)
+      const color = parseColor3(kv.color)
+      const props: Record<string, unknown> = { Name: name }
+      if (size) props.Size = size
+      if (cf) props.CFrame = cf
+      if (mat) props.Material = mat
+      if (typeof anchored === 'boolean') props.Anchored = anchored
+      if (color) props.Color = color
+      addObjectOp({ op: 'create_instance', className: 'Part', parentPath, props })
+      return { proposals }
+    }
+    if (verb === 'set_props' || verb === 'set_properties') {
+      const path = kv.path
+      if (!path) return { proposals, missingContext: 'set_props requires path=...' }
+      const props: Record<string, unknown> = {}
+      if (kv.size) props.Size = parseVec3(kv.size)
+      if (kv.cframe || kv.cf || kv.position) props.CFrame = parseCFrame(kv.cframe || kv.cf || kv.position)
+      if (kv.material) props.Material = parseMaterial(kv.material)
+      if (kv.color) props.Color = parseColor3(kv.color)
+      const anchored = toBool(kv.anchored)
+      if (typeof anchored === 'boolean') props.Anchored = anchored
+      addObjectOp({ op: 'set_properties', path, props })
+      return { proposals }
+    }
+    if (verb === 'rename') {
+      const path = kv.path
+      const newName = kv.newName || kv.name
+      if (!path || !newName) return { proposals, missingContext: 'rename requires path= and newName=' }
+      addObjectOp({ op: 'rename_instance', path, newName })
+      return { proposals }
+    }
+    if (verb === 'delete') {
+      const path = kv.path
+      if (!path) return { proposals, missingContext: 'delete requires path=' }
+      addObjectOp({ op: 'delete_instance', path })
+      return { proposals }
+    }
+    if (verb === 'insert_asset' || verb === 'insert') {
+      const assetId = Number(kv.assetId || kv.id)
+      if (!Number.isFinite(assetId) || assetId <= 0) return { proposals, missingContext: 'insert_asset requires assetId=' }
+      const parentPath = kv.parent || kv.parentPath
+      if (extras?.manualMode) {
+        return { proposals, missingContext: 'Manual mode active: asset commands are disabled. Use create_part/set_props or Luau.' }
+      }
+      addAssetOp({ assetId, parentPath })
+      return { proposals }
+    }
+    return { proposals, missingContext: `Unknown command verb: ${verb}` }
   }
   if (name === 'start_plan') {
     const steps = Array.isArray((a as any).steps) ? (a as any).steps.map(String) : []

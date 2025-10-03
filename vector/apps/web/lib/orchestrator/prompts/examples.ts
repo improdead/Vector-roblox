@@ -40,6 +40,7 @@ When to plan
 
 export const TOOL_REFERENCE = `
 Tool reference (purpose and tips)
+- run_command: Execute a single action via a compact command string. Use for creating models/parts, setting properties, or inserting assets.
 - start_plan: Begin an ordered list of steps. Use for multi-step work.
 - update_plan: Mark a step done, set next step, or add notes.
 - get_active_script: Return the currently open script (path, text) if any.
