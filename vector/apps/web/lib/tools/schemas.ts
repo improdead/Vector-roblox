@@ -54,6 +54,9 @@ const ParentEither = z
   .transform((v) => ('parentPath' in v ? v : { parentPath: (v as any).parent }))
 
 export const Tools = {
+  run_command: z.object({
+    command: z.string().min(1),
+  }),
   get_active_script: z.object({}),
   list_selection: z.object({}),
   list_open_documents: z.object({ maxCount: z.number().min(1).max(100).optional() }),
