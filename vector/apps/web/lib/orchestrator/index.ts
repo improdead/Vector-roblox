@@ -650,9 +650,6 @@ type MapToolExtras = {
   userOptedOut?: boolean
   geometryTracker?: { sawCreate: boolean; sawParts: boolean }
   subjectNouns?: string[]
-  manualMode?: boolean
-  geometryCount?: number
-  luauCount?: number
 }
 
 type MapResult = { proposals: Proposal[]; missingContext?: string; contextResult?: any }
@@ -892,22 +889,7 @@ function mapToolToProposals(
     if (typeof (a as any).className === 'string' && parentPath) {
       const childClass = (a as any).className as string
       const childProps = (a as any).props as Record<string, unknown> | undefined
-      const manualMode = !!extras?.manualMode
-      const manualProgress = ((extras?.geometryCount ?? 0) > 0) || ((extras?.luauCount ?? 0) > 0)
       const ops: ObjectOp[] = []
-
-      if (manualMode && !manualProgress && childClass === 'Model') {
-        return { proposals, missingContext: 'Manual mode: create visible Parts (Floor/Wall/Roof) or add the builder script before making additional container Models.' }
-      }
-
-      if (manualMode && childClass === 'Model') {
-        const nameProp = childProps && typeof childProps.Name === 'string' ? String(childProps.Name).trim() : ''
-        const subjects = Array.isArray(extras?.subjectNouns) ? extras!.subjectNouns : []
-        const matchesSubject = nameProp && subjects.some((noun) => noun && nameProp.toLowerCase().includes(noun.toLowerCase()))
-        if (!matchesSubject) {
-          return { proposals, missingContext: 'Manual mode active: create anchored Parts or update existing geometry instead of generic container Models.' }
-        }
-      }
 
       // Guard: keep names aligned to user nouns. Common pitfall: "House"/"SimpleHouse" for hospital tasks.
       const wantsHospital = /\bhospital\b/i.test(msg) || (extras?.subjectNouns || []).some((s) => /\bhospital\b/i.test(s))
@@ -1292,28 +1274,7 @@ function proposalTouchesGeometry(proposal: Proposal): boolean {
   return false
 }
 
-function proposalCreatesVisibleGeometry(proposal: Proposal): boolean {
-  if (!proposal) return false
-  if (proposal.type === 'object_op') {
-    return proposal.ops.some((op) => {
-      if (op.op === 'create_instance') {
-        return PART_CLASS_NAMES.has(op.className)
-      }
-      if (op.op === 'set_properties') {
-        if (isLuauScriptPath(op.path) && hasLuauSource(op.props as Record<string, unknown> | undefined)) {
-          return false
-        }
-        const props = (op.props || {}) as Record<string, unknown>
-        return ['Size', 'CFrame', 'Anchored', 'Material', 'Position', 'Orientation'].some((key) => Object.prototype.hasOwnProperty.call(props, key))
-      }
-      return false
-    })
-  }
-  if (proposal.type === 'asset_op') {
-    return !!proposal.insert || !!proposal.generate3d
-  }
-  return false
-}
+//
 
 export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[]; taskState: TaskState; tokenTotals: { in: number; out: number } }> {
   const rawMessage = input.message.trim()
@@ -1516,48 +1477,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     : ''
   const providerFirstMessage = attachments.length ? `${msg}\n\n[ATTACHMENTS]\n${attachmentSummary}` : msg
 
-  // Detect user or system instructions that force manual geometry mode
-  const saysNoAssets = (t?: string) => {
-    if (!t) return false
-    return /\b(?:do\s*not\s*(?:search|use|insert)[^\n]*?(?:assets|catalog)|no\s+assets|manual\s+geometry|primitives\s+only|no\s+catalog|avoid\s+assets|build\s+manually)\b/i.test(t)
-  }
-  const allowsAssets = (t?: string) => {
-    if (!t) return false
-    return /\b(?:allow|re\s*enable|use)\s+(?:the\s+)?(?:catalog|assets)|\bsearch\s+(?:the\s+)?catalog\b|\bresume\s+asset\s+search\b/i.test(t)
-  }
-  const userHistoryText = Array.isArray(taskState.history)
-    ? taskState.history.filter((h) => h.role === 'user').map((h) => h.content || '').join(' \n ')
-    : ''
-  const recentSystemText = Array.isArray(taskState.history)
-    ? taskState.history
-        .slice(Math.max(0, taskState.history.length - 12))
-        .filter((h) => h.role === 'system')
-        .map((h) => h.content || '')
-        .join(' \n ')
-    : ''
-  const fallbackManual = /CATALOG_UNAVAILABLE|manual\s+using\s+create_instance|manual_required/i.test(recentSystemText)
   const currentPolicy = ensureScriptPolicy(taskState)
-  let manualModeActive = !!currentPolicy.manualMode
-  if (fallbackManual) manualModeActive = true
-  if (manualModeActive && allowsAssets(msg)) {
-    updateState((state) => {
-      const policy = ensureScriptPolicy(state)
-      policy.manualMode = false
-    })
-    manualModeActive = false
-  }
-  const manualDirect = saysNoAssets(msg) || saysNoAssets(userHistoryText)
-  const manualWanted = manualModeActive || manualDirect
-
-  if (manualWanted && !manualModeActive) {
-    updateState((state) => {
-      const policy = ensureScriptPolicy(state)
-      policy.manualMode = true
-    })
-    manualModeActive = true
-  }
-  let geometryCount = currentPolicy.geometryOps || 0
-  let luauCount = currentPolicy.luauEdits || 0
 
   const contextRequestLimit = 1
   let contextRequestsThisCall = 0
@@ -1583,7 +1503,6 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   let messages: { role: 'user' | 'assistant' | 'system'; content: string }[] | null = null
   let assetFallbackWarningSent = false
   let catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
-  if (manualWanted) catalogSearchAvailable = false
   let scriptWarnings = 0
 
   const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState; tokenTotals: { in: number; out: number } } => {
@@ -1852,35 +1771,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       )
       const isActionTool = !isContextOrNonActionTool
 
-      if (manualWanted && (toolName === 'search_assets' || toolName === 'insert_asset' || toolName === 'generate_asset_3d')) {
-        consecutiveValidationErrors++
-        const errMsg = 'MANUAL_MODE Active: use create_instance/set_properties or Luau; catalog tools are disabled until manual build is complete.'
-        pushChunk(streamKey, `error.validation ${toolName} manual_mode`)
-        console.warn(`[orch] manual_mode tool=${toolName}`)
-        convo.push({ role: 'assistant', content: toolXml })
-        convo.push({ role: 'user', content: errMsg })
-        appendHistory('system', errMsg)
-        continue
-      }
-
       // Allow duplicate start_plan: if steps are unchanged, no-op; otherwise replace (handled by recordPlanStart)
       if (toolName === 'start_plan' && planReady) {
-        const incomingSteps = Array.isArray((a as any).steps)
-          ? (a as any).steps.map((s: any) => String(s || '').trim())
-          : []
-        const currentSteps = Array.isArray(taskState.plan?.steps)
-          ? taskState.plan!.steps.map((s) => String(s || '').trim())
-          : []
-        if (JSON.stringify(incomingSteps) !== JSON.stringify(currentSteps)) {
-          consecutiveValidationErrors++
-          const errMsg = 'PLAN_ACTIVE Use <update_plan> to adjust the existing plan instead of starting a new one.'
-          pushChunk(streamKey, `error.validation ${toolName} plan_active`)
-          console.warn(`[orch] plan.active tool=${toolName}`)
-          convo.push({ role: 'assistant', content: toolXml })
-          convo.push({ role: 'user', content: errMsg })
-          appendHistory('system', errMsg)
-          continue
-        }
         pushChunk(streamKey, 'plan.duplicate allowed')
       }
       if (!planReady && isActionTool && !askMode && requirePlan) {
@@ -1900,29 +1792,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         updateState((state) => { const p = ensureScriptPolicy(state); p.assetInserts = (p.assetInserts || 0) + 1 })
       }
 
-      // Enforce asset-first: require at least one search_assets attempt before manual geometry (agent mode)
-      let assetFirst = (process.env.VECTOR_ASSET_FIRST || '1') === '1'
-      if (manualWanted) assetFirst = false
-      const isGeometryTool = (toolName === 'create_instance') || (toolName === 'set_properties' && (!isLuauScriptPath((a as any).path) || !hasLuauSource((a as any).props)))
-      // Detect recent catalog failures to allow manual fallback without re-searching
-      const recentHistory = taskState.history.slice(-12).map((h) => h.content || '')
-      const assetBlocked = recentHistory.some((line) =>
-        /CATALOG_UNAVAILABLE|Asset .* failed|User is not authorized to access Asset|Failed to find \".*\" in the marketplace!|search_insert_fallback|no_results/i.test(line)
-      )
-      if (assetFirst && !askMode && catalogSearchAvailable && isActionTool && isGeometryTool) {
-        const searches = (taskState.policy?.assetSearches || 0)
-        const userRequestedManual = /\b(?:manual\s+geometry|primitives\s+only|no\s+assets)\b/i.test(msg)
-        if (searches === 0 && !userRequestedManual && !assetBlocked) {
-          const errMsg = 'ASSET_FIRST Please search the Creator Store first using <search_assets> before using manual geometry.'
-          pushChunk(streamKey, 'error.validation asset_first_required')
-          console.warn(`[orch] asset.first.require tool=${toolName}`)
-          // Echo tool for visibility then nudge
-          convo.push({ role: 'assistant', content: toolXml })
-          convo.push({ role: 'user', content: errMsg })
-          appendHistory('system', errMsg)
-          continue
-        }
-      }
+      // No asset-first enforcement; allow either assets or direct geometry per user intent
 
   if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
     a = { ...a, path: input.context.activeScript.path }
@@ -2082,9 +1952,6 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         userOptedOut,
         geometryTracker,
         subjectNouns,
-        manualMode: manualWanted,
-        geometryCount,
-        luauCount,
       })
 
       if (mapped.contextResult !== undefined) {
@@ -2114,40 +1981,13 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         name === 'attempt_completion' ||
         (name === 'message' && typeof (a as any).phase === 'string' && (a as any).phase.toLowerCase() === 'final')
 
-      if (manualWanted && !askMode && isFinalPhase && geometryCount === 0 && luauCount === 0) {
-        consecutiveValidationErrors++
-        const warn = 'MANUAL_MODE Manual mode is active. Create at least one anchored Part (e.g., floor/walls/roof) or add the HospitalBuilder Luau before finishing.'
-        pushChunk(streamKey, 'error.validation manual_mode_incomplete')
-        console.warn(`[orch] manual_mode.incomplete tool=${String(name)}`)
-        convo.push({ role: 'assistant', content: toolXml })
-        convo.push({ role: 'user', content: warn })
-        appendHistory('system', warn)
-        continue
-      }
-
-      const scriptRequired = geometryWorkObserved && !scriptWorkObserved && !userOptedOut
-      if (isFinalPhase && scriptRequired) {
-        scriptWarnings += 1
-        consecutiveValidationErrors += 1
-        const warn =
-          'SCRIPT_REQUIRED Default Script Policy: add Luau in a Script/ModuleScript (open_or_create_script → show_diff) that rebuilds the created Instances before completing. Say "geometry only" if you really need to skip.'
-        pushChunk(streamKey, 'error.validation script_required')
-        console.warn(`[orch] validation.script_missing tool=${String(name)}`)
-        convo.push({ role: 'assistant', content: toolXml })
-        convo.push({ role: 'user', content: warn })
-        appendHistory('system', warn)
-        if (consecutiveValidationErrors > validationRetryLimit || scriptWarnings > validationRetryLimit) break
-        continue
-      }
+      // No script-required gate: allow completion when user decides
 
       if (mapped.proposals.length) {
         updateState((state) => {
           const policy = ensureScriptPolicy(state)
           if (touchesGeometry) {
-            const addsVisibleGeometry = mapped.proposals.some(proposalCreatesVisibleGeometry)
-            if (addsVisibleGeometry) {
-              policy.geometryOps += 1
-            }
+            policy.geometryOps += 1
           }
           if (touchesLuau) {
             policy.luauEdits += 1
@@ -2158,9 +1998,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
             }
           }
         })
-        const refreshedPolicy = ensureScriptPolicy(taskState)
-        geometryCount = refreshedPolicy.geometryOps || 0
-        luauCount = refreshedPolicy.luauEdits || 0
+        // counters updated
         pushChunk(streamKey, `proposals.mapped ${String(name)} count=${mapped.proposals.length}`)
         console.log(`[orch] proposals.mapped tool=${String(name)} count=${mapped.proposals.length}`)
         // Stream assistant text for UI transcript
@@ -2226,8 +2064,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     }
 
     if (!fallbacksDisabled && !assetFallbackWarningSent) {
-      const warn = 'CATALOG_UNAVAILABLE Asset catalog lookup failed. Create the requested objects manually using create_instance or Luau edits.'
-      pushChunk(streamKey, 'fallback.asset manual_required')
+      const warn = 'CATALOG_UNAVAILABLE Asset catalog lookup failed. Consider manual geometry or alternative assets.'
+      pushChunk(streamKey, 'fallback.asset manual_suggest')
       console.log('[orch] fallback.asset manual_required; instructing provider to create manually')
       appendHistory('assistant', 'fallback: asset search disabled (request manual creation)')
       convo.push({ role: 'user', content: warn })
