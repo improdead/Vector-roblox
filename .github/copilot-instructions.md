@@ -207,18 +207,8 @@ For non-trivial tasks (8-15+ steps typical):
 # OpenRouter
 OPENROUTER_API_KEY=
 OPENROUTER_MODEL=moonshotai/kimi-k2:free
-VECTOR_USE_OPENROUTER=0
+VECTOR_USE_OPENROUTER=1
 
-# Gemini
-GEMINI_API_KEY=
-GEMINI_MODEL=gemini-2.5-flash
-
-# AWS Bedrock
-BEDROCK_REGION=us-east-1
-BEDROCK_MODEL_ID=anthropic.claude-3-sonnet-20240229-v1:0
-
-# NVIDIA
-NVIDIA_API_KEY=
 NVIDIA_MODEL=llama-3.1-70b-instruct
 
 # Provider selection
