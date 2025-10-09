@@ -39,6 +39,9 @@ export type ScriptPolicyState = {
   userOptedOut?: boolean
   lastOptOutAt?: number
   nudgedAt?: number
+  assetSearches?: number
+  assetInserts?: number
+  manualMode?: boolean
 }
 
 export interface TaskState {
@@ -108,10 +111,13 @@ function ensureCheckpointFields(state: TaskState): TaskState {
     state.plan = { steps: [], completed: [], currentIndex: 0 }
   }
   if (!state.policy || typeof state.policy !== 'object') {
-    state.policy = { geometryOps: 0, luauEdits: 0 }
+    state.policy = { geometryOps: 0, luauEdits: 0, assetSearches: 0, assetInserts: 0, manualMode: false }
   } else {
     state.policy.geometryOps = Math.max(0, Number(state.policy.geometryOps) || 0)
     state.policy.luauEdits = Math.max(0, Number(state.policy.luauEdits) || 0)
+    state.policy.assetSearches = Math.max(0, Number(state.policy.assetSearches) || 0)
+    state.policy.assetInserts = Math.max(0, Number(state.policy.assetInserts) || 0)
+    state.policy.manualMode = !!state.policy.manualMode
   }
   return state
 }
@@ -129,7 +135,7 @@ function defaultState(taskId: string): TaskState {
     codeDefinitions: [],
     scene: { nodes: {} },
     plan: { steps: [], completed: [], currentIndex: 0 },
-    policy: { geometryOps: 0, luauEdits: 0 },
+    policy: { geometryOps: 0, luauEdits: 0, manualMode: false, assetSearches: 0, assetInserts: 0 },
     checkpoints: { count: 0 },
     updatedAt: now,
   }

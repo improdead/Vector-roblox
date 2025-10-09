@@ -132,6 +132,7 @@ import {
   getSceneProperties,
   applyObjectOpsPreview,
   hydrateSceneSnapshot,
+  normalizeInstancePath,
 } from './sceneGraph'
 
 type ProviderMode = 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
@@ -347,106 +348,101 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
 
 const PROMPT_SECTIONS = [
   `You are Vector, a Roblox Studio copilot.`,
-  `Core rules
+  `Core rules (guidance only)
 - One tool per turn: emit EXACTLY ONE tool tag. It must be the last output (ignoring trailing whitespace). Wait for the tool result before continuing.
-- Proposal-first and undoable: never change code/Instances outside a tool; keep each step small and reviewable.
-- Plan when work spans multiple steps. For a single obvious action you may act without <start_plan>.
-- Keep responses to that single tool tag (no markdown or invented tags). Optional brief explanatory text may appear before the tag when allowed.` ,
-  `Planning details
-- For non-trivial tasks, your <start_plan> MUST list detailed, tool-specific steps (8–15 typical): include the tool name, exact target (class/path/name), and the intended outcome. Example: "Create Model 'Base' under game.Workspace", "Search assets query='barracks'", "Insert asset 12345 under game.Workspace.Base", "Set CFrame for 'Gate' to (0,0,50)", "Open or create Script 'BaseBuilder'", "Show diff to add idempotent Luau".`,
-  `Default Script Policy
-- Whenever you create, modify, or insert Instances (create_instance/set_properties/rename_instance/delete_instance/insert_asset/generate_asset_3d), you must author Luau that rebuilds the result before completing.
-- Preferred flow: open_or_create_script → show_diff (or apply_edit when already previewed). Scripts must be valid, idempotent, and set Anchored/props explicitly.
-- Skip Luau only when the user explicitly opts out (e.g., "geometry only", "no script", "no code"). Otherwise completion is blocked.`,
-  `Tool calls
-<tool_name>
-  <param>...</param>
-</tool_name>
-- Omit optional params you don’t know.
-- JSON goes inside the tag as strict JSON (double quotes, no trailing commas).
-- For show_diff/apply_edit the <edits> tag MUST contain a JSON array of edit objects (example: [{"start":{...},"end":{...},"text":"..."}]); never pass a plain string.
-- For show_diff/apply_edit when using <files>, every files[i].edits must also be that same JSON array (no strings, no code fences).`,
-  `Encoding & hygiene
-- Strings/numbers are literal. JSON must not be wrapped in quotes or code fences.
-- Paths use GetFullName() with brackets for special characters.
-- Attributes use "@Name" keys.
-- Edits are 0-based, non-overlapping, ≤20 edits and ≤2000 inserted chars.`,
-  `Assets & 3D
-  - Prefer search_assets → insert_asset for props/models. Use create_instance only for simple primitive geometry or when catalog search fails/disabled.
-  - Composite scenes (e.g., park, plaza, town square): it is acceptable to add multiple distinct assets (e.g., trees, benches, fountain, lights) as separate search_assets → insert_asset steps in the plan. Keep it concise: 2–4 categories initially, each with limit ≤ 6.
-  - Single‑subject builds (e.g., hospital, watch tower): avoid adding unrelated props unless requested. If a container model (e.g., game.Workspace.Hospital) already exists, do not recreate it; prefer inserting exactly one primary asset (e.g., a hospital building) under a sensible child like "Imported", or add obviously missing interior kits/furnishings.
-  - In Auto mode (autoApply=true), prefer choosing a single best match and inserting it directly without listing. Do not insert multiples unless the user explicitly asks for more than one.
-  - search_assets limit ≤ 6 unless the user asks. Include helpful tags.
-  - insert_asset defaults parentPath to game.Workspace if unknown. Before creating or inserting, inspect existing children (list_children) and skip duplicates when names/roles already exist.`,
-  `Scene building
-  - Always think through the layout before acting: use <start_plan> to outline the main structures, then execute steps one tool at a time.
-  - Inspect what already exists. If nothing is selected, call <list_children> on game.Workspace (depth 1–2) to inventory the scene; also use <list_selection> and <get_active_script>. Reuse or extend Models instead of duplicating them.
-  - Build geometry iteratively with create_instance/set_properties, anchoring parts and setting Size/CFrame so progress is visible in Workspace.
-  - Only switch to scripting when the user explicitly wants reusable code or behaviour. Otherwise stay in direct manipulation mode.`,
-  `Quality checks
-- Derive a short checklist from the user prompt and track progress (optionally via <message phase="update">).
-- Do not call <complete> until every checklist item exists and the matching Luau is written (unless the user opted out).
-- Created Models must contain anchored, visible parts or code that produces them.`,
-  `Validation & recovery
-- On VALIDATION_ERROR, retry the SAME tool once with corrected args (no commentary or tool switching).
-- If you would otherwise reply with no tool, either choose exactly one tool or finish with <complete>.`,
-String.raw`Quick examples
-Detailed plan (assets-first)
-<start_plan>
-  <steps>[
-    "Create Model 'MilitaryBase' under game.Workspace",
-    "Search assets query='watch tower' tags=['model'] limit=6",
-    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
-    "Search assets query='barracks' tags=['model'] limit=6",
-    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
-    "Search assets query='fence' tags=['model'] limit=6",
-    "Insert asset <ID_FROM_RESULTS> under game.Workspace.MilitaryBase",
-    "Set properties (Anchored, CFrame) to arrange towers, barracks, fence perimeter",
-    "Open or create Script 'BaseBuilder' in game.ServerScriptService",
-    "Show diff to add idempotent Luau that rebuilds the base"
-  ]</steps>
-</start_plan>
+- Default to run_command for actions (create/modify/insert). Keep list_children for context and start_plan/update_plan to outline work.
+- Keep each step small and reviewable; never modify outside a tool.`,
+  `Commands and tools (concise)
+- run_command (default for actions). Verbs:
+  • create_model parent="..." name="..."
+  • create_part parent="..." name="..." size=40,1,40 cframe=0,0.5,0 material=Concrete anchored=1
+  • set_props path="..." Anchored=1 size=... cframe=...
+  • rename path="..." newName="..." | delete path="..."
+  • insert_asset assetId=123456 parent="..." (disabled in manual mode)
+- list_children: inventory scene; include parentPath and depth when helpful.
+- start_plan / update_plan: create and maintain a single plan; use update_plan to adjust.
+- open_or_create_script / show_diff: author idempotent Luau when needed.
+- complete / final_message / message: summaries and updates.`,
+String.raw`Command cheat-sheet (guidance only)
+Inspect workspace (depth=2)
+<list_children>
+  <parentPath>game.Workspace</parentPath>
+  <depth>2</depth>
+</list_children>
 
-Insert an asset (preferred)
+Create model + floor/roof via run_command
+<run_command>
+  <command>create_model parent="game.Workspace" name="Hospital"</command>
+</run_command>
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="Floor" size=40,1,40 cframe=0,0.5,0 material=Concrete anchored=1</command>
+</run_command>
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="Roof" size=42,1,42 cframe=0,11,0 material=Slate anchored=1</command>
+</run_command>
+
+Walls (repeat with adjusted CFrame and Size)
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="WallFront" size=40,10,1 cframe=0,5.5,-19.5 material=Brick anchored=1</command>
+</run_command>
+
+Builder script (idempotent)
+<open_or_create_script>
+  <parentPath>game.ServerScriptService</parentPath>
+  <name>HospitalBuilder</name>
+</open_or_create_script>
+<show_diff>
+  <path>game.ServerScriptService.HospitalBuilder</path>
+  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"local Workspace = game:GetService('Workspace')\nlocal function ensureModel(name)\n\tlocal m = Workspace:FindFirstChild(name)\n\tif not m then\n\tm = Instance.new('Model')\n\tm.Name = name\n\tm.Parent = Workspace\n\tend\n\treturn m\nend\nlocal function ensurePart(parent, name, size, cf, mat)\n\tlocal p = parent:FindFirstChild(name)\n\tif not p then\n\tp = Instance.new('Part')\n\tp.Anchored = true\n\tp.Name = name\n\tp.Parent = parent\n\tend\n\tp.Size = size\n\tp.CFrame = cf\n\tif mat then p.Material = mat end\n\treturn p\nend\nlocal hospital = ensureModel('Hospital')\nensurePart(hospital, 'Floor', Vector3.new(40,1,40), CFrame.new(0,0.5,0), Enum.Material.Concrete)\nensurePart(hospital, 'WallFront', Vector3.new(40,10,1), CFrame.new(0,5.5,-19.5), Enum.Material.Brick)\nensurePart(hospital, 'WallBack', Vector3.new(40,10,1), CFrame.new(0,5.5,19.5), Enum.Material.Brick)\nensurePart(hospital, 'WallLeft', Vector3.new(1,10,40), CFrame.new(-19.5,5.5,0), Enum.Material.Brick)\nensurePart(hospital, 'WallRight', Vector3.new(1,10,40), CFrame.new(19.5,5.5,0), Enum.Material.Brick)\nensurePart(hospital, 'Roof', Vector3.new(42,1,42), CFrame.new(0,11,0), Enum.Material.Slate)\n"}]</edits>
+</show_diff>
+
+Catalog search + insert
 <search_assets>
-  <query>oak tree</query>
-  <tags>["tree","nature"]</tags>
+  <query>hospital bed</query>
+  <tags>["model","bed","hospital"]</tags>
   <limit>6</limit>
 </search_assets>
+<run_command>
+  <command>insert_asset assetId=125013769 parent="game.Workspace.Hospital"</command>
+</run_command>
 
-<insert_asset>
-  <assetId>123456789</assetId>
-  <parentPath>game.Workspace</parentPath>
-</insert_asset>
+Manual shell (copy block for Floor + 4 walls + roof)
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="WallBack" size=40,10,1 cframe=0,5.5,19.5 material=Brick anchored=1</command>
+</run_command>
 
-Build simple geometry (generic)
+Helpers (lights, spawn, cleanup)
+<run_command>
+  <command>create_model parent="game.Workspace" name="LightingHelper"</command>
+</run_command>
+<open_or_create_script>
+  <parentPath>game.ServerScriptService</parentPath>
+  <name>ImportedCleanup</name>
+</open_or_create_script>
+<show_diff>
+  <path>game.ServerScriptService.ImportedCleanup</path>
+  <edits>[{"start":{"line":0,"character":0},"end":{"line":0,"character":0},"text":"local container = workspace:FindFirstChild('Hospital')\nif container then\n\tfor _, inst in ipairs(container:GetDescendants()) do\n\t\tif inst:IsA('Script') or inst:IsA('LocalScript') then\n\t\t\tinst:Destroy()\n\t\tend\n\tend\nend\n"}]</edits>
+</show_diff>`,
+  `Manual fallback (guidance only)
+- If the user asks for primitives or catalog searches fail, switch to run_command create_part + set_props and add an optional builder script.
+- You may still use catalog assets when the user permits or provides an assetId.`,
+  String.raw`Examples (guidance only)
 <start_plan>
-  <steps>["Create 'Structure' model under Workspace","Create 'Floor' Part with size 16x1x16 at y=0.5 Anchored","Create 'WallFront' Part 16x8x1 at z=-7.5 Anchored","Create 'Roof' Part 16x1x16 with slight tilt Anchored"]</steps>
+  <steps>["Create Hospital model","Add floor and four walls","Add roof","Write HospitalBuilder","Summarize"]</steps>
 </start_plan>
 
-<create_instance>
-  <className>Model</className>
+<list_children>
   <parentPath>game.Workspace</parentPath>
-  <props>{"Name":"Structure"}</props>
-</create_instance>
+  <depth>1</depth>
+</list_children>
 
-<create_instance>
-  <className>Part</className>
-  <parentPath>game.Workspace.Structure</parentPath>
-  <props>{"Name":"Floor","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,0.5,0, 1,0,0, 0,1,0, 0,0,1]},"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"WoodPlanks"}}</props>
-</create_instance>
+<run_command>
+  <command>create_model parent="game.Workspace" name="Hospital"</command>
+</run_command>
 
-<create_instance>
-  <className>Part</className>
-  <parentPath>game.Workspace.Structure</parentPath>
-  <props>{"Name":"WallFront","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":8,"z":1},"CFrame":{"__t":"CFrame","comps":[0,4.5,-7.5, 1,0,0, 0,1,0, 0,0,1]},"Material":{"__t":"EnumItem","enum":"Enum.Material","name":"Brick"}}</props>
-</create_instance>
-
-<create_instance>
-  <className>Part</className>
-  <parentPath>game.Workspace.Structure</parentPath>
-  <props>{"Name":"Roof","Anchored":true,"Size":{"__t":"Vector3","x":16,"y":1,"z":16},"CFrame":{"__t":"CFrame","comps":[0,8.6,0, 1,0,0, 0,0.5,-0.8660254, 0,0.8660254,0.5]},"Color":{"__t":"Color3","r":0.6,"g":0.2,"b":0.2}}</props>
-</create_instance>`
+<run_command>
+  <command>create_part parent="game.Workspace.Hospital" name="Floor" size=40,1,40 cframe=0,0.5,0 material=Concrete anchored=1</command>
+</run_command>`
 ]
 
 const SYSTEM_PROMPT = PROMPT_SECTIONS.join('\n\n')
@@ -712,6 +708,7 @@ type MapToolExtras = {
   recordPlanUpdate?: (update: { completedStep?: string; nextStep?: string; notes?: string }) => void
   userOptedOut?: boolean
   geometryTracker?: { sawCreate: boolean; sawParts: boolean }
+  subjectNouns?: string[]
 }
 
 type MapResult = { proposals: Proposal[]; missingContext?: string; contextResult?: any }
@@ -727,6 +724,133 @@ function mapToolToProposals(
   const ensurePath = (fallback?: string | null): string | undefined => {
     const p = typeof a.path === 'string' ? a.path : undefined
     return p || (fallback || undefined)
+  }
+  if (name === 'run_command') {
+    const cmdRaw = typeof (a as any).command === 'string' ? (a as any).command.trim() : ''
+    if (!cmdRaw) return { proposals, missingContext: 'Provide a command string.' }
+    const parseKV = (s: string): Record<string, string> => {
+      const out: Record<string, string> = {}
+      const re = /(\w+)=(("[^"]*")|('[^']*')|([^\s]+))/g
+      let m: RegExpExecArray | null
+      while ((m = re.exec(s))) {
+        const key = String(m[1])
+        let val = String(m[2])
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1)
+        }
+        out[key] = val
+      }
+      return out
+    }
+    const toBool = (v?: string) => {
+      if (!v) return undefined
+      const t = v.toLowerCase()
+      if (t === '1' || t === 'true' || t === 'yes' || t === 'on') return true
+      if (t === '0' || t === 'false' || t === 'no' || t === 'off') return false
+      return undefined
+    }
+    const parseVec3 = (v?: string) => {
+      if (!v) return undefined
+      const parts = v.replace(/[xX]/g, ',').split(/[,\s]+/).filter(Boolean)
+      if (parts.length < 3) return undefined
+      const nums = parts.slice(0, 3).map((p) => Number(p))
+      if (nums.some((n) => !Number.isFinite(n))) return undefined
+      return { __t: 'Vector3', x: nums[0], y: nums[1], z: nums[2] }
+    }
+    const parseColor3 = (v?: string) => {
+      if (!v) return undefined
+      const parts = v.split(/[,\s]+/).filter(Boolean)
+      if (parts.length < 3) return undefined
+      const nums = parts.slice(0, 3).map((p) => Number(p))
+      if (nums.some((n) => !Number.isFinite(n))) return undefined
+      return { __t: 'Color3', r: nums[0], g: nums[1], b: nums[2] }
+    }
+    const parseCFrame = (v?: string) => {
+      if (!v) return undefined
+      const parts = v.split(/[,\s]+/).filter(Boolean).map((p) => Number(p))
+      if (parts.some((n) => !Number.isFinite(n))) return undefined
+      if (parts.length >= 12) return { __t: 'CFrame', comps: parts.slice(0, 12) }
+      if (parts.length >= 3) return { __t: 'CFrame', comps: [parts[0], parts[1], parts[2], 1,0,0, 0,1,0, 0,0,1] }
+      return undefined
+    }
+    const parseMaterial = (v?: string) => {
+      if (!v) return undefined
+      const name = v.trim()
+      if (!name) return undefined
+      return { __t: 'EnumItem', enum: 'Enum.Material', name }
+    }
+    const [verbRaw, ...rest] = cmdRaw.split(/\s+/)
+    const verb = (verbRaw || '').toLowerCase()
+    const argsLine = rest.join(' ')
+    const kv = parseKV(argsLine)
+    const addObjectOp = (op: ObjectOp) => {
+      proposals.push({ id: id('obj'), type: 'object_op', ops: [op], notes: `Parsed from run_command: ${verb}` })
+    }
+    const addAssetOp = (insert?: { assetId: number; parentPath?: string }) => {
+      if (!insert) return
+      if (extras?.manualMode) return
+      proposals.push({ id: id('asset'), type: 'asset_op', insert, search: undefined, generate3d: undefined, meta: {} as any })
+    }
+    if (verb === 'create_model') {
+      const parentPath = kv.parent || kv.parentPath || 'game.Workspace'
+      const name = kv.name || 'Model'
+      addObjectOp({ op: 'create_instance', className: 'Model', parentPath, props: { Name: name } })
+      return { proposals }
+    }
+    if (verb === 'create_part') {
+      const parentPath = kv.parent || kv.parentPath || 'game.Workspace'
+      const name = kv.name || 'Part'
+      const size = parseVec3(kv.size)
+      const cf = parseCFrame(kv.cframe || kv.cf || kv.position)
+      const mat = parseMaterial(kv.material)
+      const anchored = toBool(kv.anchored)
+      const color = parseColor3(kv.color)
+      const props: Record<string, unknown> = { Name: name }
+      if (size) props.Size = size
+      if (cf) props.CFrame = cf
+      if (mat) props.Material = mat
+      if (typeof anchored === 'boolean') props.Anchored = anchored
+      if (color) props.Color = color
+      addObjectOp({ op: 'create_instance', className: 'Part', parentPath, props })
+      return { proposals }
+    }
+    if (verb === 'set_props' || verb === 'set_properties') {
+      const path = kv.path
+      if (!path) return { proposals, missingContext: 'set_props requires path=...' }
+      const props: Record<string, unknown> = {}
+      if (kv.size) props.Size = parseVec3(kv.size)
+      if (kv.cframe || kv.cf || kv.position) props.CFrame = parseCFrame(kv.cframe || kv.cf || kv.position)
+      if (kv.material) props.Material = parseMaterial(kv.material)
+      if (kv.color) props.Color = parseColor3(kv.color)
+      const anchored = toBool(kv.anchored)
+      if (typeof anchored === 'boolean') props.Anchored = anchored
+      addObjectOp({ op: 'set_properties', path, props })
+      return { proposals }
+    }
+    if (verb === 'rename') {
+      const path = kv.path
+      const newName = kv.newName || kv.name
+      if (!path || !newName) return { proposals, missingContext: 'rename requires path= and newName=' }
+      addObjectOp({ op: 'rename_instance', path, newName })
+      return { proposals }
+    }
+    if (verb === 'delete') {
+      const path = kv.path
+      if (!path) return { proposals, missingContext: 'delete requires path=' }
+      addObjectOp({ op: 'delete_instance', path })
+      return { proposals }
+    }
+    if (verb === 'insert_asset' || verb === 'insert') {
+      const assetId = Number(kv.assetId || kv.id)
+      if (!Number.isFinite(assetId) || assetId <= 0) return { proposals, missingContext: 'insert_asset requires assetId=' }
+      const parentPath = kv.parent || kv.parentPath
+      if (extras?.manualMode) {
+        return { proposals, missingContext: 'Manual mode active: asset commands are disabled. Use create_part/set_props or Luau.' }
+      }
+      addAssetOp({ assetId, parentPath })
+      return { proposals }
+    }
+    return { proposals, missingContext: `Unknown command verb: ${verb}` }
   }
   if (name === 'start_plan') {
     const steps = Array.isArray((a as any).steps) ? (a as any).steps.map(String) : []
@@ -826,6 +950,25 @@ function mapToolToProposals(
       const childProps = (a as any).props as Record<string, unknown> | undefined
       const ops: ObjectOp[] = []
 
+      // Guard: keep names aligned to user nouns. Common pitfall: "House"/"SimpleHouse" for hospital tasks.
+      const wantsHospital = /\bhospital\b/i.test(msg) || (extras?.subjectNouns || []).some((s) => /\bhospital\b/i.test(s))
+      if (wantsHospital && childClass === 'Model' && childProps && typeof childProps.Name === 'string') {
+        const nm = String(childProps.Name)
+        if (/^simple\s*house$/i.test(nm) || /^house$/i.test(nm) || /^structure$/i.test(nm)) {
+          (a as any).props = { ...childProps, Name: 'Hospital' }
+        }
+      }
+      let normalizedParentPath = parentPath
+      if (wantsHospital && typeof normalizedParentPath === 'string') {
+        normalizedParentPath = normalizedParentPath
+          .replace(/(game\.)?Workspace\.SimpleHouse\b/i, 'game.Workspace.Hospital')
+          .replace(/(game\.)?Workspace\.House\b/i, 'game.Workspace.Hospital')
+          .replace(/(game\.)?Workspace\.Structure\b/i, 'game.Workspace.Hospital')
+          .replace(/^Workspace\.SimpleHouse\b/i, 'Workspace.Hospital')
+          .replace(/^Workspace\.House\b/i, 'Workspace.Hospital')
+          .replace(/^Workspace\.Structure\b/i, 'Workspace.Hospital')
+      }
+
       // Build known scene paths, with and without 'game.' prefix for services
       const nodes = Array.isArray(input.context.scene?.nodes) ? input.context.scene!.nodes! : []
       const known = new Set<string>()
@@ -838,35 +981,41 @@ function mapToolToProposals(
         if (SERVICE_PREFIXES.includes(head)) known.add(`game.${p}`)
       }
 
-      const looksLikeWorkspace = /^game\.Workspace(?:\.|$)/i.test(parentPath) || /^Workspace(?:\.|$)/.test(parentPath)
+      const looksLikeWorkspace = /^game\.Workspace(?:\.|$)/i.test(normalizedParentPath) || /^Workspace(?:\.|$)/.test(normalizedParentPath)
       if (looksLikeWorkspace) {
-        // Walk up and create missing ancestors as Models under Workspace
-        const chain: { parent: string; name: string }[] = []
-        let cur = parentPath
-        let guard = 0
-        while (cur && !known.has(cur) && guard++ < 10) {
-          const noGame = cur.replace(/^game\./, '')
-          if (known.has(noGame)) break
-          const split = splitInstancePath(cur)
-          const inferredParent = split.parentPath || 'game.Workspace'
-          const inferredName = split.name || 'Model'
-          if (/^game\.Workspace$/i.test(inferredParent) || /^Workspace$/i.test(inferredParent)) {
-            const normalizedParent = /^Workspace$/i.test(inferredParent) ? 'game.Workspace' : inferredParent
-            chain.push({ parent: normalizedParent, name: inferredName })
+        // Skip ancestor creation when targeting the root Workspace directly
+        if (!/^game\.Workspace$/i.test(normalizedParentPath) && !/^Workspace$/i.test(normalizedParentPath)) {
+          // Walk up and create missing ancestors (beyond Workspace) as Models under Workspace
+          const chain: { parent: string; name: string }[] = []
+          let cur = normalizedParentPath
+          let guard = 0
+          while (cur && !known.has(cur) && guard++ < 10) {
+            const noGame = cur.replace(/^game\./, '')
+            if (known.has(noGame)) break
+            const split = splitInstancePath(cur)
+            const inferredParent = split.parentPath || 'game.Workspace'
+            const inferredName = split.name || 'Model'
+            // Avoid generating bogus entries for the Workspace or 'game' segment
+            const isRootParent = /^game\.Workspace$/i.test(inferredParent) || /^Workspace$/i.test(inferredParent)
+            const isRootName = /^Workspace$/i.test(inferredName) || /^game$/i.test(inferredName)
+            if (isRootParent && !isRootName) {
+              const normalizedParent = /^Workspace$/i.test(inferredParent) ? 'game.Workspace' : inferredParent
+              chain.push({ parent: normalizedParent, name: inferredName })
+            }
+            if (!split.parentPath || /^game\.Workspace$/i.test(split.parentPath) || /^Workspace$/i.test(split.parentPath)) break
+            cur = split.parentPath
           }
-          if (!split.parentPath || /^game\.Workspace$/i.test(split.parentPath) || /^Workspace$/i.test(split.parentPath)) break
-          cur = split.parentPath
-        }
-        for (let i = chain.length - 1; i >= 0; i--) {
-          const seg = chain[i]
-          ops.push({ op: 'create_instance', className: 'Model', parentPath: seg.parent, props: { Name: seg.name } })
-          const createdPath = buildInstancePath(seg.parent.replace(/^game\./, ''), seg.name).replace(/^Workspace\./, 'Workspace.')
-          known.add(createdPath)
-          known.add(`game.${createdPath}`)
+          for (let i = chain.length - 1; i >= 0; i--) {
+            const seg = chain[i]
+            ops.push({ op: 'create_instance', className: 'Model', parentPath: seg.parent, props: { Name: seg.name } })
+            const createdPath = buildInstancePath(seg.parent.replace(/^game\./, ''), seg.name).replace(/^Workspace\./, 'Workspace.')
+            known.add(createdPath)
+            known.add(`game.${createdPath}`)
+          }
         }
       }
 
-      ops.push({ op: 'create_instance', className: childClass, parentPath, props: childProps })
+      ops.push({ op: 'create_instance', className: childClass, parentPath: normalizedParentPath, props: (a as any).props as any })
       proposals.push({ id: id('obj'), type: 'object_op', ops, notes: 'Parsed from create_instance' })
       if (extras?.geometryTracker) {
         extras.geometryTracker.sawCreate = true
@@ -980,11 +1129,37 @@ function mapToolToProposals(
       targetPath = buildInstancePath(parentPath, scriptName)
     }
 
-    const knownSource = targetPath ? extras?.getScriptSource?.(targetPath) : undefined
-    let created = false
-    let text = typeof knownSource === 'string' ? knownSource : ''
+    const normalizePath = (value?: string) => normalizeInstancePath(value) || undefined
+    const pathsEqual = (left?: string, right?: string): boolean => {
+      const normLeft = normalizePath(left)
+      const normRight = normalizePath(right)
+      if (!normLeft || !normRight) return false
+      if (normLeft === normRight) return true
+      const withGameLeft = normLeft.startsWith('game.') ? normLeft : `game.${normLeft}`
+      const withGameRight = normRight.startsWith('game.') ? normRight : `game.${normRight}`
+      if (withGameLeft === withGameRight) return true
+      const withoutGameLeft = normLeft.replace(/^game\./, '')
+      const withoutGameRight = normRight.replace(/^game\./, '')
+      return withoutGameLeft === withoutGameRight
+    }
 
-    if (targetPath && typeof knownSource !== 'string') {
+    const activeScript = input.context.activeScript
+    const knownSource = targetPath ? extras?.getScriptSource?.(targetPath) : undefined
+    let text: string | undefined = typeof knownSource === 'string' ? knownSource : undefined
+
+    if (text === undefined && activeScript && pathsEqual(activeScript.path, targetPath)) {
+      text = typeof activeScript.text === 'string' ? activeScript.text : ''
+    }
+
+    const sceneNodes = Array.isArray(input.context.scene?.nodes) ? input.context.scene!.nodes! : []
+    const scriptExistsInScene = !!targetPath && sceneNodes.some((node) => pathsEqual(node?.path, targetPath))
+
+    if (text === undefined && scriptExistsInScene) {
+      return { proposals, missingContext: `Need script Source for ${targetPath}. Open the script or call <get_active_script>.` }
+    }
+
+    let created = false
+    if (targetPath && text === undefined) {
       created = true
       text = ''
       const op: ObjectOp = {
@@ -999,10 +1174,13 @@ function mapToolToProposals(
         notes: 'Ensure script exists before editing.',
         ops: [op],
       })
+    }
+
+    if (targetPath && text !== undefined) {
       extras?.recordScriptSource?.(targetPath, text)
     }
 
-    return { proposals, contextResult: { path: targetPath, text, created } }
+    return { proposals, contextResult: { path: targetPath, text: text ?? '', created } }
   }
   if (name === 'complete') {
     const summary = typeof (a as any).summary === 'string' ? (a as any).summary : undefined
@@ -1100,17 +1278,14 @@ const SCRIPT_OPT_IN_PATTERNS = [
   /\bprovide\s+(?:the\s+)?script\b/i,
 ]
 
-const GEOMETRY_INTENT_PATTERNS = [
-  /\b(build|create|make|spawn|place|add|put|drop)\b[^.!?]{0,120}\b(house|building|structure|scene|environment|world|level|map|terrain|tower|bridge|park|city|village|room|base|farm|garden|landscape)\b/i,
-  /\bpopulate\b[^.!?]{0,120}\b(scene|world|environment)\b/i,
-  /\bdecorate\b[^.!?]{0,120}\b(scene|area|room)\b/i,
-]
+// Removed implicit geometry-intent opt-out: natural phrases like "build a hospital" should not disable scripting
+const GEOMETRY_INTENT_PATTERNS: RegExp[] = []
 
 function detectScriptOptPreference(text: string): boolean | null {
   if (!text) return null
   if (SCRIPT_OPT_OUT_PATTERNS.some((pat) => pat.test(text))) return true
   if (SCRIPT_OPT_IN_PATTERNS.some((pat) => pat.test(text))) return false
-  if (GEOMETRY_INTENT_PATTERNS.some((pat) => pat.test(text))) return true
+  // Do not infer opt-out from generic build verbs; prefer explicit user opt-in/opt-out
   return null
 }
 
@@ -1157,6 +1332,8 @@ function proposalTouchesGeometry(proposal: Proposal): boolean {
   }
   return false
 }
+
+//
 
 export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[]; taskState: TaskState; tokenTotals: { in: number; out: number } }> {
   const rawMessage = input.message.trim()
@@ -1218,6 +1395,20 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   const scriptSources: Record<string, string> = { ...(taskState.scriptSources || {}) }
+  // Infer stable subject nouns (e.g., "hospital") from prior user messages or plan steps
+  const subjectNouns: string[] = (() => {
+    const nouns = new Set<string>()
+    try {
+      const hist = Array.isArray(taskState.history) ? taskState.history : []
+      const histText = hist.map((h) => (h?.content || '')).join(' \n ')
+      if (/\bhospital\b/i.test(histText)) nouns.add('hospital')
+    } catch {}
+    try {
+      const steps = Array.isArray(taskState.plan?.steps) ? taskState.plan!.steps : []
+      if (steps.some((s) => /\bHospital\b/i.test(String(s)))) nouns.add('hospital')
+    } catch {}
+    return Array.from(nouns)
+  })()
   const normalizeScriptPath = (path?: string) => (path || '').trim()
   const getScriptSource = (path: string): string | undefined => {
     const key = normalizeScriptPath(path)
@@ -1237,7 +1428,24 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   const recordPlanStart = (steps: string[]) => {
-    const normalized = steps.map((s) => (typeof s === 'string' ? s.trim() : '')).filter((s) => s.length > 0)
+    const raw = steps.map((s) => (typeof s === 'string' ? s.trim() : '')).filter((s) => s.length > 0)
+    // Sanitize step names to avoid subject drift (e.g., "SimpleHouse" instead of requested "Hospital")
+    const normalized = raw.map((s) => {
+      let out = s
+      if ((subjectNouns || []).some((n) => /\bhospital\b/i.test(n))) {
+        out = out
+          .replace(/\bSimpleHouse\b/g, 'Hospital')
+          .replace(/\bHouse\b/g, 'Hospital')
+          .replace(/\bStructure\b/g, 'Hospital')
+      }
+      return out
+    })
+    const current = Array.isArray(taskState.plan?.steps) ? taskState.plan!.steps : []
+    const changed = JSON.stringify(current) !== JSON.stringify(normalized)
+    if (!changed) {
+      pushChunk(streamKey, 'plan.keep (no change)')
+      return
+    }
     updateState((state) => {
       state.plan = { steps: normalized, completed: [], currentIndex: 0 }
     })
@@ -1245,6 +1453,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
   }
 
   const recordPlanUpdate = (update: { completedStep?: string; nextStep?: string; notes?: string }) => {
+    let changed = false
     updateState((state) => {
       if (!state.plan) {
         state.plan = { steps: [], completed: [], currentIndex: 0 }
@@ -1255,19 +1464,22 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         if (idx >= 0 && !plan.completed.includes(update.completedStep)) {
           plan.completed.push(update.completedStep)
           plan.currentIndex = Math.min(idx + 1, plan.steps.length - 1)
+          changed = true
         }
       }
       if (update.nextStep) {
         const idx = plan.steps.findIndex((step) => step === update.nextStep)
-        if (idx >= 0) {
+        if (idx >= 0 && plan.currentIndex !== idx) {
           plan.currentIndex = idx
+          changed = true
         }
       }
-      if (typeof update.notes === 'string' && update.notes.trim().length > 0) {
+      if (typeof update.notes === 'string' && update.notes.trim().length > 0 && plan.notes !== update.notes.trim()) {
         plan.notes = update.notes.trim()
+        changed = true
       }
     })
-    pushChunk(streamKey, 'plan.update ' + JSON.stringify(update))
+    pushChunk(streamKey, changed ? ('plan.update ' + JSON.stringify(update)) : 'plan.keep (no material change)')
   }
 
   let userOptedOut = !!taskState.policy?.userOptedOut
@@ -1324,6 +1536,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     : ''
   const providerFirstMessage = attachments.length ? `${msg}\n\n[ATTACHMENTS]\n${attachmentSummary}` : msg
 
+  const currentPolicy = ensureScriptPolicy(taskState)
+
   const contextRequestLimit = 1
   let contextRequestsThisCall = 0
   let requestAdditionalContext: (reason: string) => boolean = () => false
@@ -1347,7 +1561,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
   let messages: { role: 'user' | 'assistant' | 'system'; content: string }[] | null = null
   let assetFallbackWarningSent = false
-  const catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
+  let catalogSearchAvailable = (process.env.CATALOG_DISABLE_SEARCH || '0') !== '1'
   let scriptWarnings = 0
 
   const finalize = (list: Proposal[]): { proposals: Proposal[]; taskState: TaskState; tokenTotals: { in: number; out: number } } => {
@@ -1595,7 +1809,9 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
 
       const planReady = Array.isArray(taskState.plan?.steps) && (taskState.plan?.steps.length || 0) > 0
       const askMode = (input.mode || 'agent') === 'ask'
-      const requirePlan = (process.env.VECTOR_REQUIRE_PLAN || '0') === '1'
+      const envRequirePlan = process.env.VECTOR_REQUIRE_PLAN
+      // Default OFF: only require a plan when explicitly enabled via env.
+      const requirePlan = (typeof envRequirePlan === 'string' && envRequirePlan.trim().length > 0) ? (envRequirePlan === '1') : false
       const isContextOrNonActionTool = (
         toolName === 'start_plan' ||
         toolName === 'update_plan' ||
@@ -1613,6 +1829,11 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         toolName === 'search_files'
       )
       const isActionTool = !isContextOrNonActionTool
+
+      // Allow duplicate start_plan: if steps are unchanged, no-op; otherwise replace (handled by recordPlanStart)
+      if (toolName === 'start_plan' && planReady) {
+        pushChunk(streamKey, 'plan.duplicate allowed')
+      }
       if (!planReady && isActionTool && !askMode && requirePlan) {
         const errMsg = 'PLAN_REQUIRED Call <start_plan> with a step-by-step outline before taking actions.'
         pushChunk(streamKey, `error.validation ${String(name)} plan_required`)
@@ -1622,6 +1843,15 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         appendHistory('system', errMsg)
         continue
       }
+
+      // Record asset usage counters
+      if (toolName === 'search_assets') {
+        updateState((state) => { const p = ensureScriptPolicy(state); p.assetSearches = (p.assetSearches || 0) + 1 })
+      } else if (toolName === 'insert_asset') {
+        updateState((state) => { const p = ensureScriptPolicy(state); p.assetInserts = (p.assetInserts || 0) + 1 })
+      }
+
+      // No asset-first enforcement; allow either assets or direct geometry per user intent
 
   if ((name === 'show_diff' || name === 'apply_edit') && !a.path && input.context.activeScript?.path) {
     a = { ...a, path: input.context.activeScript.path }
@@ -1780,6 +2010,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         recordPlanUpdate,
         userOptedOut,
         geometryTracker,
+        subjectNouns,
       })
 
       if (mapped.contextResult !== undefined) {
@@ -1809,20 +2040,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
         name === 'attempt_completion' ||
         (name === 'message' && typeof (a as any).phase === 'string' && (a as any).phase.toLowerCase() === 'final')
 
-      const scriptRequired = geometryWorkObserved && !scriptWorkObserved && !userOptedOut
-      if (isFinalPhase && scriptRequired) {
-        scriptWarnings += 1
-        consecutiveValidationErrors += 1
-        const warn =
-          'SCRIPT_REQUIRED Default Script Policy: add Luau in a Script/ModuleScript (open_or_create_script → show_diff) that rebuilds the created Instances before completing. Say "geometry only" if you really need to skip.'
-        pushChunk(streamKey, 'error.validation script_required')
-        console.warn(`[orch] validation.script_missing tool=${String(name)}`)
-        convo.push({ role: 'assistant', content: toolXml })
-        convo.push({ role: 'user', content: warn })
-        appendHistory('system', warn)
-        if (consecutiveValidationErrors > validationRetryLimit || scriptWarnings > validationRetryLimit) break
-        continue
-      }
+      // No script-required gate: allow completion when user decides
 
       if (mapped.proposals.length) {
         updateState((state) => {
@@ -1839,6 +2057,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
             }
           }
         })
+        // counters updated
         pushChunk(streamKey, `proposals.mapped ${String(name)} count=${mapped.proposals.length}`)
         console.log(`[orch] proposals.mapped tool=${String(name)} count=${mapped.proposals.length}`)
         // Stream assistant text for UI transcript
@@ -1904,8 +2123,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     }
 
     if (!fallbacksDisabled && !assetFallbackWarningSent) {
-      const warn = 'CATALOG_UNAVAILABLE Asset catalog lookup failed. Create the requested objects manually using create_instance or Luau edits.'
-      pushChunk(streamKey, 'fallback.asset manual_required')
+      const warn = 'CATALOG_UNAVAILABLE Asset catalog lookup failed. Consider manual geometry or alternative assets.'
+      pushChunk(streamKey, 'fallback.asset manual_suggest')
       console.log('[orch] fallback.asset manual_required; instructing provider to create manually')
       appendHistory('assistant', 'fallback: asset search disabled (request manual creation)')
       convo.push({ role: 'user', content: warn })
@@ -1962,7 +2181,7 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
     ])
   }
 
-  if (!fallbacksDisabled) {
+  if (fallbacksDisabled) {
     const errMsg = 'ASSET_FALLBACK_DISABLED Asset catalog fallback is disabled. Create the requested objects manually using create_instance or Luau edits.'
     pushChunk(streamKey, 'fallback.asset disabled')
     console.warn('[orch] fallback.asset disabled; no proposals after provider warning')

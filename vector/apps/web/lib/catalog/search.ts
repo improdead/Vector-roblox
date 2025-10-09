@@ -1,4 +1,13 @@
-export type CatalogItem = { id: number; name: string; creator: string; type: string; thumbnailUrl?: string }
+export type CatalogItem = {
+  id: number
+  name: string
+  creator: string
+  type: string
+  thumbnailUrl?: string
+  creatorId?: number
+  creatorType?: string
+  isVerified?: boolean
+}
 
 type CatalogSearchOptions = {
   tags?: string[]
@@ -6,7 +15,7 @@ type CatalogSearchOptions = {
 
 const ROBLOX_CATALOG_URL = 'https://catalog.roblox.com/v1/search/items/details'
 const ROBLOX_THUMBNAIL_URL = 'https://thumbnails.roblox.com/v1/assets'
-const ROBLOX_ALLOWED_LIMITS = [10, 28, 30] as const
+const ROBLOX_ALLOWED_LIMITS = [10, 28, 30, 60] as const
 
 const TAG_CATEGORY_MAP: Record<string, 'Models' | 'Audio' | 'Decals' | 'Animations'> = {
   audio: 'Audio',
@@ -52,7 +61,7 @@ function normalizeString(value?: string | null): string | undefined {
 }
 
 function pickRobloxLimit(limit: number): number {
-  const safe = Math.max(1, Math.min(50, Number.isFinite(limit) ? limit : 8))
+  const safe = Math.max(1, Math.min(60, Number.isFinite(limit) ? limit : 8))
   for (const allowed of ROBLOX_ALLOWED_LIMITS) {
     if (safe <= allowed) return allowed
   }
@@ -98,7 +107,7 @@ async function fetchRobloxThumbnails(ids: number[]): Promise<Map<number, string>
 
 async function fetchFromRoblox(query: string, limit: number, opts?: CatalogSearchOptions): Promise<CatalogItem[]> {
   const trimmedQuery = query?.trim() ?? ''
-  const desiredLimit = Math.max(1, Math.min(50, Number.isFinite(limit) ? limit : 8))
+  const desiredLimit = Math.max(1, Math.min(60, Number.isFinite(limit) ? limit : 8))
   const requestLimit = pickRobloxLimit(desiredLimit)
   const category = deriveCategory(opts?.tags)
   const params = new URLSearchParams({
@@ -109,6 +118,7 @@ async function fetchFromRoblox(query: string, limit: number, opts?: CatalogSearc
     SortType: '3',
   })
   // Optional: restrict to free assets only when explicitly requested
+  // Default free-only OFF to broaden results; env can enable explicitly
   const freeOnly = String(process.env.CATALOG_FREE_ONLY || '0') === '1'
   if (freeOnly) {
     // Prefer Roblox sales filter for free items; explicit price filters often 0-out results
@@ -156,12 +166,19 @@ async function fetchFromRoblox(query: string, limit: number, opts?: CatalogSearc
     for (const entry of sliced) {
       const id = Number(entry?.id)
       if (!Number.isFinite(id)) continue
+      const creatorIdRaw = entry?.creatorTargetId ?? entry?.creatorId
+      const creatorId = typeof creatorIdRaw === 'number' ? creatorIdRaw : Number(creatorIdRaw)
+      const creatorType = typeof entry?.creatorType === 'string' ? entry.creatorType : undefined
+      const isVerified = Boolean(entry?.creatorHasVerifiedBadge ?? entry?.hasVerifiedBadge)
       items.push({
         id,
         name: typeof entry?.name === 'string' ? entry.name : `Asset ${id}`,
         creator: typeof entry?.creatorName === 'string' ? entry.creatorName : 'Unknown',
         type: assetTypeLabel(entry?.assetType),
         thumbnailUrl: thumbMap.get(id),
+        creatorId: Number.isFinite(creatorId) ? Number(creatorId) : undefined,
+        creatorType,
+        isVerified,
       })
     }
     return items
@@ -207,7 +224,7 @@ async function fetchFromCreatorStoreToolbox(query: string, limit: number, opts?:
   // Broaden results by allowing all creators (verified and non-verified)
   url.searchParams.set('includeOnlyVerifiedCreators', 'false')
   // Free-only via price caps in cents
-  if (String(process.env.CATALOG_FREE_ONLY || '0') === '1') {
+  if (String(process.env.CATALOG_FREE_ONLY || '1') === '1') {
     url.searchParams.set('minPriceCents', '0')
     url.searchParams.set('maxPriceCents', '0')
   }
@@ -244,7 +261,20 @@ async function fetchFromCreatorStoreToolbox(query: string, limit: number, opts?:
         // Toolbox imagePreviewAssets are asset ids; thumbnails route might be needed separately.
         // Use undefined here; downstream can fetch thumbnails by id if needed.
       }
-      items.push({ id, name, creator, type, thumbnailUrl })
+      const creatorIdRaw = entry?.creator?.id ?? entry?.creatorId
+      const creatorId = typeof creatorIdRaw === 'number' ? creatorIdRaw : Number(creatorIdRaw)
+      const creatorType = typeof entry?.creator?.type === 'string' ? entry.creator.type : undefined
+      const isVerified = Boolean(entry?.creator?.hasVerifiedBadge ?? entry?.creatorHasVerifiedBadge)
+      items.push({
+        id,
+        name,
+        creator,
+        type,
+        thumbnailUrl,
+        creatorId: Number.isFinite(creatorId) ? Number(creatorId) : undefined,
+        creatorType,
+        isVerified,
+      })
     }
     return items.slice(0, Math.max(1, Math.min(50, limit || 8)))
   } finally {
