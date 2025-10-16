@@ -4,6 +4,11 @@
 
 **Keep the XML tags.** Don't migrate to native function calling.
 
+### Update (Oct 16, 2024)
+- XML parser hardened to accept JSON/function-call fallbacks and attribute-based tags
+- `search_assets` tags now parsed from strings, nested XML, or comma-separated formats
+- See `FIXES_APPLIED.md` for implementation details and test cases
+
 ---
 
 ## The Question

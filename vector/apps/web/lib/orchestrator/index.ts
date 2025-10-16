@@ -561,31 +561,220 @@ export type ParsedTool = {
   innerRaw: string
 }
 
-export function parseToolXML(text: string): ParsedTool | null {
-  if (!text) return null
-  const toolRe = /<([a-zA-Z_][\w]*)>([\s\S]*?)<\/\1>/
-  const toolMatch = toolRe.exec(text)
-  if (!toolMatch) return null
-  const name = toolMatch[1]
-  const inner = toolMatch[2]
-  const prefixText = text.slice(0, toolMatch.index || 0)
-  const suffixText = text.slice((toolMatch.index || 0) + toolMatch[0].length)
-  // parse child tags into args
-  const args: Record<string, any> = {}
-  const tagRe = /<([a-zA-Z_][\w]*)>([\s\S]*?)<\/\1>/g
-  let m: RegExpExecArray | null
-  while ((m = tagRe.exec(inner))) {
-    const k = m[1]
-    const raw = m[2]
-    args[k] = coercePrimitive(raw)
-  }
-  // If no child tags, try parsing whole inner as JSON (or JSON-like)
-  if (Object.keys(args).length === 0) {
-    const asJson = coercePrimitive(inner)
-    if (asJson && typeof asJson === 'object') {
-      return { name, args: asJson as any, prefixText, suffixText, innerRaw: inner }
+function pickFirstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === 'string') {
+      const trimmed = value.trim()
+      if (trimmed.length > 0) return trimmed
     }
   }
+  return undefined
+}
+
+function parseAttributeString(raw: string): Record<string, any> {
+  const attrs: Record<string, any> = {}
+  if (!raw) return attrs
+  const attrRe = /([a-zA-Z_][\w-]*)\s*(?:=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'=<>`]+)))?/g
+  let match: RegExpExecArray | null
+  while ((match = attrRe.exec(raw))) {
+    const key = match[1]
+    const value = match[2] ?? match[3] ?? match[4]
+    if (value === undefined) {
+      attrs[key] = true
+    } else {
+      attrs[key] = coercePrimitive(value)
+    }
+  }
+  return attrs
+}
+
+function tryParseJsonTool(text: string): { name: string; args: Record<string, any> } | null {
+  const trimmed = text.trim()
+  if (!trimmed) return null
+  if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return null
+  const parsed = coercePrimitive(trimmed)
+  if (!parsed || typeof parsed !== 'object') return null
+  const container = Array.isArray(parsed)
+    ? parsed
+    : Array.isArray((parsed as any).tool_calls)
+      ? (parsed as any).tool_calls
+      : Array.isArray((parsed as any).toolCalls)
+        ? (parsed as any).toolCalls
+        : Array.isArray((parsed as any).actions)
+          ? (parsed as any).actions
+          : null
+  const candidate = container && container.length > 0
+    ? container[0]
+    : (parsed as any).tool_call ?? (parsed as any).toolCall ?? parsed
+  if (!candidate || typeof candidate !== 'object') return null
+  const name = pickFirstString(
+    (candidate as any).name,
+    (candidate as any).tool,
+    (candidate as any).function,
+    (candidate as any).fn,
+    (candidate as any).action,
+    (candidate as any).function?.name,
+    (candidate as any).action?.name,
+  )
+  if (!name) return null
+  let args: any =
+    (candidate as any).arguments ??
+    (candidate as any).args ??
+    (candidate as any).parameters ??
+    (candidate as any).params ??
+    ((candidate as any).function && (candidate as any).function.arguments) ??
+    ((candidate as any).function && (candidate as any).function.args)
+  if (typeof args === 'string') {
+    const parsedArgs = coercePrimitive(args)
+    if (parsedArgs && typeof parsedArgs === 'object') args = parsedArgs
+  }
+  const rest: Record<string, any> = Array.isArray(container) ? {} : { ...(candidate as any) }
+  if (!Array.isArray(container)) {
+    delete rest.name
+    delete rest.tool
+    delete rest.function
+    delete rest.fn
+    delete rest.action
+    delete rest.arguments
+    delete rest.args
+    delete rest.parameters
+    delete rest.params
+    delete rest.type
+  }
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    return { name, args: { ...(args as Record<string, any>), ...rest } }
+  }
+  if (Object.keys(rest).length > 0) {
+    return { name, args: rest }
+  }
+  if (args && typeof args === 'object') {
+    return { name, args: args as Record<string, any> }
+  }
+  return { name, args: {} }
+}
+
+function normalizeToolNameAndArgs(name: string, args: Record<string, any>, innerRaw: string): { name: string; args: Record<string, any> } {
+  const lower = name.toLowerCase()
+  if (lower === 'tool_call' || lower === 'toolcall' || lower === 'function_call' || lower === 'functioncall' || lower === 'action' || lower === 'call' || lower === 'tool') {
+    const candidateName = pickFirstString(
+      args.name,
+      args.tool,
+      args.function,
+      args.fn,
+      args.action,
+      args.function?.name,
+      args.action?.name,
+    )
+    let candidateArgs: any =
+      args.arguments ??
+      args.args ??
+      args.parameters ??
+      args.params ??
+      (args.function && typeof args.function === 'object' ? (args.function as any).arguments ?? (args.function as any).args : undefined)
+    if (typeof candidateArgs === 'string') {
+      const parsedArgs = coercePrimitive(candidateArgs)
+      if (parsedArgs && typeof parsedArgs === 'object') candidateArgs = parsedArgs
+    }
+    if (!candidateArgs && typeof innerRaw === 'string' && innerRaw.trim().length > 0) {
+      const parsedInner = coercePrimitive(innerRaw.trim())
+      if (parsedInner && typeof parsedInner === 'object') candidateArgs = parsedInner
+    }
+    if (candidateName) {
+      const rest: Record<string, any> = { ...args }
+      delete rest.name
+      delete rest.tool
+      delete rest.function
+      delete rest.fn
+      delete rest.action
+      delete rest.arguments
+      delete rest.args
+      delete rest.parameters
+      delete rest.params
+      delete rest.type
+      if (rest.function && typeof rest.function === 'object') delete rest.function
+      if (rest.action && typeof rest.action === 'object') delete rest.action
+      let finalArgs: Record<string, any> = {}
+      if (candidateArgs && typeof candidateArgs === 'object') {
+        finalArgs = { ...(candidateArgs as Record<string, any>) }
+      }
+      if (Object.keys(rest).length > 0) {
+        finalArgs = { ...rest, ...finalArgs }
+      }
+      return { name: candidateName, args: finalArgs }
+    }
+  }
+  return { name, args }
+}
+
+export function parseToolXML(text: string): ParsedTool | null {
+  if (!text) return null
+  const trimmed = text.trim()
+  if (!trimmed) return null
+
+  const jsonTool = tryParseJsonTool(trimmed)
+  if (jsonTool) {
+    const start = text.indexOf(trimmed)
+    const prefixText = start > 0 ? text.slice(0, start) : ''
+    const suffixText = text.slice((start >= 0 ? start : 0) + trimmed.length)
+    return { name: jsonTool.name, args: jsonTool.args, prefixText, suffixText, innerRaw: trimmed }
+  }
+
+  const toolRe = /<([a-zA-Z_][\w-]*)([^>]*)>([\s\S]*?)<\/\1>/
+  const toolMatch = toolRe.exec(text)
+  if (!toolMatch) return null
+  let name = toolMatch[1]
+  const attrSegment = toolMatch[2] || ''
+  const inner = toolMatch[3] || ''
+  const prefixText = text.slice(0, toolMatch.index || 0)
+  const suffixText = text.slice((toolMatch.index || 0) + toolMatch[0].length)
+
+  let args: Record<string, any> = { ...parseAttributeString(attrSegment) }
+
+  const childRe = /<([a-zA-Z_][\w-]*)([^>]*)>([\s\S]*?)<\/\1>/g
+  let childMatch: RegExpExecArray | null
+  let childCount = 0
+  while ((childMatch = childRe.exec(inner))) {
+    childCount++
+    const childName = childMatch[1]
+    const childAttrs = parseAttributeString(childMatch[2] || '')
+    const childInner = childMatch[3] || ''
+    let value: any
+    const parsedNested = parseXmlObject(childInner)
+    if (parsedNested && Object.keys(parsedNested).length > 0) {
+      value = parsedNested
+    } else {
+      value = coerceXmlOrPrimitive(childInner)
+    }
+    if (Object.keys(childAttrs).length > 0) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        value = { ...childAttrs, ...value }
+      } else if (value !== undefined && value !== null) {
+        value = { ...childAttrs, value }
+      } else {
+        value = childAttrs
+      }
+    }
+    args[childName] = value
+  }
+
+  if (childCount === 0) {
+    const parsedXml = parseXmlObject(inner)
+    if (parsedXml && Object.keys(parsedXml).length > 0) {
+      args = { ...args, ...parsedXml }
+    } else {
+      const asJson = coercePrimitive(inner)
+      if (asJson && typeof asJson === 'object' && !Array.isArray(asJson)) {
+        args = { ...args, ...(asJson as Record<string, any>) }
+      } else if (inner.trim().length > 0 && Object.keys(args).length === 0) {
+        args.value = coercePrimitive(inner)
+      }
+    }
+  }
+
+  const normalized = normalizeToolNameAndArgs(name, args, inner)
+  name = normalized.name
+  args = normalized.args
+
   return { name, args, prefixText, suffixText, innerRaw: inner }
 }
 
@@ -593,18 +782,125 @@ function parseXmlObject(input: string): Record<string, any> | null {
   if (typeof input !== 'string') return null
   const s = input.trim()
   if (!s.startsWith('<')) return null
-  const tagRe = /<([a-zA-Z_][\w]*)>([\s\S]*?)<\/\1>/g
+  const tagRe = /<([a-zA-Z_][\w-]*)([^>]*)>([\s\S]*?)<\/\1>/g
   const out: Record<string, any> = {}
   let matched = false
-  let m: RegExpExecArray | null
-  while ((m = tagRe.exec(s))) {
+  let match: RegExpExecArray | null
+  while ((match = tagRe.exec(s))) {
     matched = true
-    const key = m[1]
-    const raw = m[2]
-    const hasNested = /<([a-zA-Z_][\w]*)>/.test(raw)
-    out[key] = hasNested ? (parseXmlObject(raw) ?? coercePrimitive(raw)) : coercePrimitive(raw)
+    const key = match[1]
+    const attrSegment = match[2] || ''
+    const raw = match[3] || ''
+    let value: any
+    const nested = parseXmlObject(raw)
+    if (nested && Object.keys(nested).length > 0) {
+      value = nested
+    } else {
+      value = coercePrimitive(raw)
+    }
+    const attrs = parseAttributeString(attrSegment)
+    if (Object.keys(attrs).length > 0) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        value = { ...attrs, ...value }
+      } else if (value !== undefined && value !== null) {
+        value = { ...attrs, value }
+      } else {
+        value = attrs
+      }
+    }
+    if (out[key] === undefined) {
+      out[key] = value
+    } else if (Array.isArray(out[key])) {
+      (out[key] as any[]).push(value)
+    } else {
+      out[key] = [out[key], value]
+    }
   }
+
+  const selfClosingRe = /<([a-zA-Z_][\w-]*)([^>]*)\/>/g
+  while ((match = selfClosingRe.exec(s))) {
+    matched = true
+    const key = match[1]
+    const attrs = parseAttributeString(match[2] || '')
+    const value = Object.keys(attrs).length > 0 ? attrs : true
+    if (out[key] === undefined) out[key] = value
+    else if (Array.isArray(out[key])) (out[key] as any[]).push(value)
+    else out[key] = [out[key], value]
+  }
+
   return matched ? out : null
+}
+
+function coerceXmlOrPrimitive(raw: string): any {
+  const xml = parseXmlObject(raw)
+  if (xml && Object.keys(xml).length > 0) return xml
+  return coercePrimitive(raw)
+}
+
+function extractStringDeep(raw: any, depth = 0): string | undefined {
+  if (raw == null || depth > 5) return undefined
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim()
+    return trimmed.length > 0 ? trimmed : undefined
+  }
+  if (typeof raw === 'number' || typeof raw === 'boolean') {
+    return String(raw)
+  }
+  if (Array.isArray(raw)) {
+    for (const item of raw) {
+      const str = extractStringDeep(item, depth + 1)
+      if (str) return str
+    }
+    return undefined
+  }
+  if (typeof raw === 'object') {
+    const preferredKeys = ['query', 'value', 'text', 'label', 'name', 'title']
+    for (const key of preferredKeys) {
+      if (key in raw) {
+        const str = extractStringDeep((raw as any)[key], depth + 1)
+        if (str) return str
+      }
+    }
+    for (const value of Object.values(raw)) {
+      const str = extractStringDeep(value, depth + 1)
+      if (str) return str
+    }
+  }
+  return undefined
+}
+
+function toStringArrayFlexible(raw: unknown): string[] | undefined {
+  if (raw == null) return undefined
+  const result: string[] = []
+  const seen = new Set<any>()
+  const visit = (value: any, depth: number) => {
+    if (value == null || depth > 5) return
+    if (typeof value === 'string') {
+      const trimmed = value.trim()
+      if (trimmed.length > 0) result.push(trimmed)
+      return
+    }
+    if (typeof value === 'number' || typeof value === 'boolean') {
+      result.push(String(value))
+      return
+    }
+    if (seen.has(value)) return
+    if (Array.isArray(value)) {
+      seen.add(value)
+      for (const item of value) visit(item, depth + 1)
+      seen.delete(value)
+      return
+    }
+    if (typeof value === 'object') {
+      seen.add(value)
+      for (const val of Object.values(value)) visit(val, depth + 1)
+      seen.delete(value)
+    }
+  }
+  visit(raw, 0)
+  if (!result.length) return undefined
+  const deduped = Array.from(new Set(result))
+  return deduped.length ? deduped : undefined
 }
 
 function toClassWhitelist(raw: any): Record<string, boolean> | undefined {
@@ -919,9 +1215,23 @@ function mapToolToProposals(
     return { proposals, missingContext: 'Need selected instance to delete.' }
   }
   if (name === 'search_assets') {
-    const query = typeof (a as any).query === 'string' ? (a as any).query : (msg || 'button')
-    const tags = Array.isArray((a as any).tags) ? (a as any).tags.map(String) : undefined
-    const limit = typeof (a as any).limit === 'number' ? (a as any).limit : 6
+    const rawQuery = (a as any).query
+    let query = extractStringDeep(rawQuery)
+    if (query) query = query.trim()
+    if (!query || query.length === 0) query = msg || 'button'
+    const tagsArray = toStringArrayFlexible((a as any).tags)
+    const tags = tagsArray && tagsArray.length > 0 ? tagsArray.slice(0, 16) : undefined
+    const limitRaw = (a as any).limit
+    let limit: number | undefined = typeof limitRaw === 'number' && Number.isFinite(limitRaw) ? limitRaw : undefined
+    if (limit === undefined && typeof limitRaw === 'string') {
+      const parsed = Number(limitRaw.trim())
+      if (Number.isFinite(parsed)) limit = parsed
+    }
+    if (typeof limit !== 'number' || !Number.isFinite(limit) || limit <= 0) limit = 6
+    limit = Math.max(1, Math.min(50, Math.floor(limit)))
+    if (!query || query.trim().length === 0) {
+      return { proposals, missingContext: 'search_assets requires non-empty query parameter' }
+    }
     proposals.push({ id: id('asset'), type: 'asset_op', search: { query, tags, limit } })
     return { proposals }
   }
