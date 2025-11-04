@@ -45,10 +45,32 @@ function ensureScene(state: TaskState): SceneGraph {
   return state.scene
 }
 
+const SERVICE_HEADS = new Set([
+  'Workspace',
+  'ReplicatedStorage',
+  'ServerStorage',
+  'StarterGui',
+  'StarterPack',
+  'StarterPlayer',
+  'Lighting',
+  'Teams',
+  'SoundService',
+  'TextService',
+  'CollectionService',
+])
+
 export function normalizeInstancePath(path?: string): string | undefined {
   if (typeof path !== 'string') return undefined
-  const trimmed = path.trim()
-  return trimmed.length > 0 ? trimmed : undefined
+  let trimmed = path.trim()
+  if (!trimmed) return undefined
+  // Canonicalize service heads to include 'game.' prefix for consistency
+  // Examples: 'Workspace', 'Workspace.Hospital' -> 'game.Workspace', 'game.Workspace.Hospital'
+  const startsWithGame = trimmed.startsWith('game.')
+  const head = trimmed.split('.')[0]
+  if (!startsWithGame && SERVICE_HEADS.has(head)) {
+    trimmed = `game.${trimmed}`
+  }
+  return trimmed
 }
 
 type SnapshotNode = { path: string; className: string; name: string; parentPath?: string; props?: Record<string, unknown> }
