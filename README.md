@@ -1,17 +1,8 @@
 # Vector — Roblox Studio Copilot
 
 A **Roblox Studio AI copilot** with a **Next.js backend** and an **LLM tool-calling orchestrator**, designed to mirror Cline's step-by-step tool usage, context management, and diff-first editing. Vector enables safe, undoable changes to Roblox places through a docked chat UI in Studio, with proposals for edits, instance operations, and asset integrations.
+[![Watch the demo](https://img.youtube.com/vi/BAoDPCdBlew/0.jpg)](https://youtu.be/BAoDPCdBlew)
 
-<div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;">
-  <iframe
-    src="https://www.youtube.com/embed/BAoDPCdBlew"
-    title="Vector — Roblox Studio Copilot Demo"
-    frameborder="0"
-    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture"
-    allowfullscreen
-    style="position:absolute;top:0;left:0;width:100%;height:100%;"
-  ></iframe>
-</div>
 ## Overview
 
 - **Studio Plugin (Luau)**: Provides a docked chat interface, reads active editor state, previews diffs, and applies edits inside Roblox's `ChangeHistoryService`. It communicates with the backend for LLM orchestration.
