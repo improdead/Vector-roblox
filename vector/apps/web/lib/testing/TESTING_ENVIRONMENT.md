@@ -1,553 +1,115 @@
-# Mock Roblox Studio Testing Environment
+# Vector Agent Testing Environment
 
-**Version:** 1.0
+**Version:** 2.0
 **Created:** 2025-11-09
-**Purpose:** Browser-based testing playground for Vector agent development and debugging
-
----
-
-## Table of Contents
-
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Components](#components)
-4. [File Structure](#file-structure)
-5. [Implementation Plan](#implementation-plan)
-6. [API Reference](#api-reference)
-7. [Usage Examples](#usage-examples)
-8. [Testing Scenarios](#testing-scenarios)
+**Purpose:** Automated test runner for Vector agent with virtual Roblox environment
 
 ---
 
 ## Overview
 
-### Problem
-Testing the Vector agent currently requires:
-- Running actual Roblox Studio
-- Manual plugin installation
-- Slow feedback loop
-- Difficult to reproduce bugs
-- Hard to inspect internal state
+### What This Is
 
-### Solution
-A **browser-based mock Roblox Studio environment** that simulates:
-- File system (Lua scripts)
-- Game instance hierarchy (Workspace, ReplicatedStorage, etc.)
-- Active script/selection state
-- Agent chat interface
-- Proposal preview & application
-- Real-time tool call logging
+An **automated testing framework** that:
+- Simulates a Roblox Studio environment in-memory
+- Runs agent prompts with auto-approval
+- Captures all tool calls, code generation, and state changes
+- Outputs detailed logs and reports for review
+- Tests individual tools + real-world scenarios
 
-### Benefits
+### What This Is NOT
 
-✅ **Fast Development**: No Studio restart needed
-✅ **Easy Debugging**: Inspect state, tool calls, context
-✅ **Reproducible Tests**: Save/load mock states
-✅ **Visual Feedback**: See exactly what agent does
-✅ **Isolated Testing**: Test individual features without side effects
+- ❌ Not a UI/playground
+- ❌ Not manual testing
+- ❌ Not a replacement for the plugin
+
+### Use Cases
+
+✅ Test agent capabilities without Studio
+✅ Verify tool calls work correctly
+✅ Review generated code quality
+✅ Debug agent logic step-by-step
+✅ Regression testing for changes
+✅ Performance benchmarking
 
 ---
 
 ## Architecture
 
-### System Diagram
-
-```mermaid
-graph TB
-    UI[Browser UI - /test-studio]
-
-    subgraph "Mock Studio Panel"
-        Explorer[File Tree Explorer]
-        Editor[Script Editor]
-        Props[Properties Panel]
-        Console[Output Console]
-    end
-
-    subgraph "Agent Panel"
-        Chat[Chat Interface]
-        Proposals[Proposal Previews]
-        Log[Tool Call Log]
-    end
-
-    State[Mock Studio State Manager]
-    Context[Mock Context Provider]
-    Applier[Proposal Applier]
-
-    API[/api/chat Endpoint]
-    Orchestrator[LLM Orchestrator]
-
-    UI --> Explorer
-    UI --> Editor
-    UI --> Chat
-
-    Explorer --> State
-    Editor --> State
-    Chat --> API
-
-    State --> Context
-    Context --> API
-    API --> Orchestrator
-
-    Orchestrator --> Proposals
-    Proposals --> Applier
-    Applier --> State
-
-    Orchestrator --> Log
 ```
-
-### Data Flow
-
-1. **User Action** → Update mock state (edit file, select instance)
-2. **Chat Message** → Mock context provider gathers state
-3. **API Call** → `/api/chat` with mock context
-4. **Agent Response** → Stream to UI, parse proposals
-5. **User Approval** → Proposal applier updates mock state
-6. **State Change** → UI re-renders with new state
-
----
-
-## Components
-
-### 1. Mock Studio State Manager
-
-**File:** `lib/testing/mock-studio-state.ts`
-
-**Responsibility:** Central state management for mock Studio environment
-
-#### Interface
-
-```typescript
-interface MockStudioState {
-  // File System
-  files: Map<string, ScriptFile>;
-
-  // Instance Hierarchy
-  instances: Map<string, MockInstance>;
-  root: MockInstance; // Game root
-
-  // Current State
-  activeScript: { path: string; content: string } | null;
-  selection: string[]; // Array of instance paths
-
-  // History (for undo/redo)
-  history: StateSnapshot[];
-  historyIndex: number;
-
-  // Output
-  logs: LogEntry[];
-}
-
-interface ScriptFile {
-  path: string;
-  content: string;
-  language: 'lua' | 'luau';
-  lastModified: number;
-}
-
-interface MockInstance {
-  path: string;
-  className: string;
-  name: string;
-  parent: string | null;
-  children: string[];
-  properties: Record<string, any>;
-}
-
-interface StateSnapshot {
-  timestamp: number;
-  files: Map<string, ScriptFile>;
-  instances: Map<string, MockInstance>;
-  description: string;
-}
-```
-
-#### Methods
-
-```typescript
-class MockStudioStateManager {
-  // File Operations
-  createFile(path: string, content: string, language?: 'lua' | 'luau'): void
-  updateFile(path: string, content: string): void
-  deleteFile(path: string): void
-  getFile(path: string): ScriptFile | null
-
-  // Instance Operations
-  createInstance(
-    parent: string,
-    className: string,
-    name: string,
-    properties?: Record<string, any>
-  ): MockInstance
-  deleteInstance(path: string): void
-  setProperties(path: string, props: Record<string, any>): void
-  renameInstance(path: string, newName: string): void
-
-  // State Management
-  setActiveScript(path: string | null): void
-  setSelection(paths: string[]): void
-
-  // History
-  createSnapshot(description: string): void
-  undo(): boolean
-  redo(): boolean
-
-  // Logging
-  log(level: 'info' | 'warn' | 'error', message: string): void
-  clearLogs(): void
-
-  // Export/Import
-  exportState(): SerializedState
-  importState(state: SerializedState): void
-}
-```
-
-#### Default State
-
-```typescript
-const DEFAULT_STATE: MockStudioState = {
-  instances: new Map([
-    ['game', { path: 'game', className: 'DataModel', name: 'Game', ... }],
-    ['game.Workspace', { path: 'game.Workspace', className: 'Workspace', ... }],
-    ['game.ReplicatedStorage', { ... }],
-    ['game.ServerScriptService', { ... }],
-  ]),
-  files: new Map([
-    ['game.ServerScriptService.MainScript', {
-      path: 'game.ServerScriptService.MainScript',
-      content: '-- MainScript.lua\nprint("Hello from Vector!")\n',
-      language: 'lua'
-    }]
-  ]),
-  activeScript: null,
-  selection: [],
-  history: [],
-  historyIndex: -1,
-  logs: []
-};
+┌─────────────────────────────────────────────────────────────┐
+│                    Test Runner (CLI)                         │
+└───────────────────────┬─────────────────────────────────────┘
+                        │
+         ┌──────────────┴──────────────┐
+         │                             │
+    ┌────▼─────┐                 ┌────▼─────┐
+    │ Tool     │                 │ Scenario │
+    │ Tests    │                 │ Tests    │
+    └────┬─────┘                 └────┬─────┘
+         │                             │
+         └──────────────┬──────────────┘
+                        │
+              ┌─────────▼──────────┐
+              │ Virtual Environment │
+              │                     │
+              │ • Mock File System  │
+              │ • Mock Instances    │
+              │ • Mock Selection    │
+              └─────────┬───────────┘
+                        │
+              ┌─────────▼──────────┐
+              │   Agent Runner      │
+              │                     │
+              │ • Call /api/chat    │
+              │ • Auto-approve all  │
+              │ • Capture output    │
+              └─────────┬───────────┘
+                        │
+              ┌─────────▼──────────┐
+              │  Report Generator   │
+              │                     │
+              │ • Terminal output   │
+              │ • JSON report       │
+              │ • HTML report       │
+              └─────────────────────┘
 ```
 
 ---
 
-### 2. Mock Context Provider
+## Test Structure
 
-**File:** `lib/testing/mock-context.ts`
+### Individual Tool Tests
 
-**Responsibility:** Convert mock state → Vector context format
+**One test per tool call**, verifies the agent can:
 
-#### Interface
+1. ✅ **get_active_script** - Read current script
+2. ✅ **list_selection** - List selected instances
+3. ✅ **list_open_documents** - List open files
+4. ✅ **show_diff** - Propose code changes
+5. ✅ **apply_edit** - Apply code edits
+6. ✅ **create_instance** - Create new instances
+7. ✅ **set_properties** - Modify instance properties
+8. ✅ **rename_instance** - Rename instances
+9. ✅ **delete_instance** - Delete instances
+10. ✅ **search_assets** - Search Roblox catalog
+11. ✅ **insert_asset** - Insert assets
 
-```typescript
-function getMockContext(state: MockStudioState): ChatContext {
-  return {
-    activeScript: state.activeScript ? {
-      path: state.activeScript.path,
-      text: state.activeScript.content
-    } : null,
+### Scenario Tests (Real-World)
 
-    selection: state.selection.map(path => {
-      const instance = state.instances.get(path);
-      return {
-        className: instance?.className || '',
-        path: path
-      };
-    }),
+**Two comprehensive tests** that combine multiple tools:
 
-    openDocs: Array.from(state.files.values())
-      .filter(f => f.path !== state.activeScript?.path)
-      .map(f => ({ path: f.path })),
+1. ✅ **Scenario A: "Create a Blinking Part"**
+   - Create Part instance
+   - Create Script in Part
+   - Generate blinking code
+   - Set initial color property
 
-    scene: {
-      nodes: Array.from(state.instances.values()).map(inst => ({
-        path: inst.path,
-        className: inst.className,
-        name: inst.name,
-        parentPath: inst.parent || undefined,
-        props: inst.properties
-      }))
-    },
-
-    codeDefinitions: [] // Could parse files for functions/classes
-  };
-}
-```
-
----
-
-### 3. Proposal Applier
-
-**File:** `lib/testing/proposal-applier.ts`
-
-**Responsibility:** Apply agent proposals to mock state
-
-#### Interface
-
-```typescript
-class ProposalApplier {
-  constructor(private state: MockStudioStateManager) {}
-
-  async applyProposal(proposal: Proposal): Promise<ApplyResult> {
-    // Create snapshot before applying
-    this.state.createSnapshot(`Before: ${proposal.tool}`);
-
-    try {
-      switch (proposal.tool) {
-        case 'apply_edit':
-          return await this.applyEdit(proposal.params);
-        case 'create_instance':
-          return await this.createInstance(proposal.params);
-        case 'set_properties':
-          return await this.setProperties(proposal.params);
-        case 'rename_instance':
-          return await this.renameInstance(proposal.params);
-        case 'delete_instance':
-          return await this.deleteInstance(proposal.params);
-        default:
-          throw new Error(`Unknown tool: ${proposal.tool}`);
-      }
-    } catch (error) {
-      this.state.undo(); // Rollback on error
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : String(error)
-      };
-    }
-  }
-
-  private async applyEdit(params: ApplyEditParams): Promise<ApplyResult> {
-    const { path, edits } = params;
-    const file = this.state.getFile(path);
-
-    if (!file) {
-      throw new Error(`File not found: ${path}`);
-    }
-
-    let content = file.content;
-
-    // Apply edits in reverse order
-    const sorted = [...edits].sort((a, b) => {
-      if (a.start.line !== b.start.line) return b.start.line - a.start.line;
-      return b.start.character - a.start.character;
-    });
-
-    for (const edit of sorted) {
-      content = this.applyTextEdit(content, edit);
-    }
-
-    this.state.updateFile(path, content);
-    this.state.log('info', `Applied edits to ${path}`);
-
-    return { success: true };
-  }
-
-  // ... other methods
-}
-```
-
----
-
-### 4. UI Components
-
-#### MockExplorer Component
-
-**File:** `components/test-studio/MockExplorer.tsx`
-
-**Purpose:** Display file tree and instance hierarchy
-
-```tsx
-interface MockExplorerProps {
-  state: MockStudioState;
-  onSelectFile: (path: string) => void;
-  onSelectInstance: (path: string) => void;
-}
-
-export function MockExplorer({ state, onSelectFile, onSelectInstance }: MockExplorerProps) {
-  return (
-    <div className="border rounded p-4">
-      <h3 className="font-bold mb-2">Explorer</h3>
-      <TreeView root={state.root} instances={state.instances}>
-        {(node) => (
-          <TreeNode
-            node={node}
-            onClick={() => {
-              if (isScript(node)) {
-                onSelectFile(node.path);
-              } else {
-                onSelectInstance(node.path);
-              }
-            }}
-          />
-        )}
-      </TreeView>
-    </div>
-  );
-}
-```
-
-#### MockScriptEditor Component
-
-**File:** `components/test-studio/MockScriptEditor.tsx`
-
-**Purpose:** Editable script content
-
-```tsx
-interface MockScriptEditorProps {
-  file: ScriptFile | null;
-  onChange: (content: string) => void;
-}
-
-export function MockScriptEditor({ file, onChange }: MockScriptEditorProps) {
-  if (!file) {
-    return <div className="text-gray-500">No file selected</div>;
-  }
-
-  return (
-    <div className="border rounded">
-      <div className="bg-gray-100 px-4 py-2 font-mono text-sm">
-        {file.path}
-      </div>
-      <textarea
-        value={file.content}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full h-96 p-4 font-mono text-sm"
-        spellCheck={false}
-      />
-    </div>
-  );
-}
-```
-
-#### AgentChat Component
-
-**File:** `components/test-studio/AgentChat.tsx`
-
-**Purpose:** Chat interface with streaming responses
-
-```tsx
-interface AgentChatProps {
-  context: ChatContext;
-  onProposal: (proposal: Proposal) => void;
-}
-
-export function AgentChat({ context, onProposal }: AgentChatProps) {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [input, setInput] = useState('');
-  const [streaming, setStreaming] = useState(false);
-
-  async function sendMessage() {
-    setStreaming(true);
-
-    const response = await fetch('/api/chat', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        projectId: 'test-studio',
-        message: input,
-        context,
-        mode: 'agent'
-      })
-    });
-
-    const reader = response.body?.getReader();
-    let buffer = '';
-
-    while (reader) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += new TextDecoder().decode(value);
-      // Parse JSON lines, extract proposals
-      // ...
-    }
-
-    setStreaming(false);
-  }
-
-  return (
-    <div className="flex flex-col h-full">
-      <ChatHistory messages={messages} />
-      <ChatInput
-        value={input}
-        onChange={setInput}
-        onSend={sendMessage}
-        disabled={streaming}
-      />
-    </div>
-  );
-}
-```
-
-#### ProposalCard Component
-
-**File:** `components/test-studio/ProposalCard.tsx`
-
-**Purpose:** Display and approve/reject proposals
-
-```tsx
-interface ProposalCardProps {
-  proposal: Proposal;
-  onApprove: () => void;
-  onReject: () => void;
-}
-
-export function ProposalCard({ proposal, onApprove, onReject }: ProposalCardProps) {
-  return (
-    <div className="border rounded p-4 mb-4">
-      <div className="flex items-center justify-between mb-2">
-        <span className="font-bold">{proposal.tool}</span>
-        <span className="text-sm text-gray-500">#{proposal.id}</span>
-      </div>
-
-      {proposal.tool === 'show_diff' && (
-        <DiffView edits={proposal.params.edits} />
-      )}
-
-      {proposal.tool === 'create_instance' && (
-        <InstancePreview params={proposal.params} />
-      )}
-
-      <div className="flex gap-2 mt-4">
-        <button
-          onClick={onApprove}
-          className="px-4 py-2 bg-green-500 text-white rounded"
-        >
-          Approve
-        </button>
-        <button
-          onClick={onReject}
-          className="px-4 py-2 bg-red-500 text-white rounded"
-        >
-          Reject
-        </button>
-      </div>
-    </div>
-  );
-}
-```
-
-#### ToolCallLog Component
-
-**File:** `components/test-studio/ToolCallLog.tsx`
-
-**Purpose:** Real-time activity log
-
-```tsx
-interface ToolCallLogProps {
-  logs: LogEntry[];
-}
-
-export function ToolCallLog({ logs }: ToolCallLogProps) {
-  return (
-    <div className="border rounded p-4 h-48 overflow-y-auto font-mono text-xs">
-      {logs.map((log, i) => (
-        <div key={i} className={`log-${log.level}`}>
-          <span className="text-gray-500">[{formatTime(log.timestamp)}]</span>
-          <span className="ml-2">{log.message}</span>
-        </div>
-      ))}
-    </div>
-  );
-}
-```
+2. ✅ **Scenario B: "Build a Player Leaderboard"**
+   - Create UI structure (ScreenGui, Frame, TextLabels)
+   - Generate leaderboard script
+   - Set properties (Size, Position, Text)
+   - Link events
 
 ---
 
@@ -555,495 +117,911 @@ export function ToolCallLog({ logs }: ToolCallLogProps) {
 
 ```
 vector/apps/web/
-├── app/
-│   └── test-studio/
-│       ├── page.tsx                    # Main test playground page
-│       └── layout.tsx                  # Layout wrapper
+├── lib/
+│   └── testing/
+│       ├── TESTING_ENVIRONMENT.md       # This doc
+│       │
+│       ├── runner/
+│       │   ├── test-runner.ts           # Main CLI runner
+│       │   ├── virtual-env.ts           # Mock Studio state
+│       │   ├── agent-executor.ts        # Execute agent prompts
+│       │   └── report-generator.ts      # Generate reports
+│       │
+│       ├── tests/
+│       │   ├── tool-tests.ts            # Individual tool tests
+│       │   └── scenario-tests.ts        # Real-world scenarios
+│       │
+│       └── fixtures/
+│           ├── default-state.ts         # Initial virtual state
+│           └── test-prompts.ts          # Test prompt templates
 │
-├── components/
-│   └── test-studio/
-│       ├── MockExplorer.tsx            # File tree + instance hierarchy
-│       ├── MockScriptEditor.tsx        # Code editor
-│       ├── PropertiesPanel.tsx         # Instance properties
-│       ├── OutputConsole.tsx           # Logs display
-│       ├── AgentChat.tsx               # Chat interface
-│       ├── ProposalCard.tsx            # Proposal preview/actions
-│       ├── DiffView.tsx                # Unified diff display
-│       ├── ToolCallLog.tsx             # Activity timeline
-│       └── StateInspector.tsx          # Debug state viewer
+├── scripts/
+│   └── test-agent.ts                    # Entry point: npm run test:agent
 │
-└── lib/
-    └── testing/
-        ├── TESTING_ENVIRONMENT.md      # This document
-        ├── mock-studio-state.ts        # State manager class
-        ├── mock-context.ts             # Context provider
-        ├── proposal-applier.ts         # Apply proposals to state
-        ├── default-state.ts            # Initial mock state
-        └── utils.ts                    # Helper functions
+└── test-results/
+    ├── latest.json                      # JSON output
+    ├── latest.html                      # HTML report
+    └── latest.log                       # Raw logs
+```
+
+---
+
+## Implementation Details
+
+### 1. Virtual Environment
+
+**File:** `lib/testing/runner/virtual-env.ts`
+
+Simulates Roblox Studio environment in-memory.
+
+```typescript
+interface VirtualEnvironment {
+  // File System
+  files: Map<string, VirtualFile>;
+
+  // Instance Hierarchy
+  instances: Map<string, VirtualInstance>;
+  dataModel: VirtualInstance; // Root "game"
+
+  // Current State
+  activeScript: string | null;
+  selection: string[];
+
+  // Change History
+  changes: Change[];
+}
+
+interface VirtualFile {
+  path: string;
+  content: string;
+  language: 'lua' | 'luau';
+  created: number;
+  modified: number;
+}
+
+interface VirtualInstance {
+  path: string;           // e.g., "game.Workspace.Part1"
+  className: string;      // e.g., "Part"
+  name: string;           // e.g., "Part1"
+  parent: string | null;
+  children: string[];
+  properties: Record<string, any>;
+}
+
+interface Change {
+  timestamp: number;
+  type: 'file_create' | 'file_update' | 'instance_create' | 'property_set' | 'instance_delete';
+  target: string;
+  before?: any;
+  after?: any;
+  toolCall?: string;
+}
+
+class VirtualEnvironment {
+  constructor(initialState?: Partial<VirtualEnvironment>);
+
+  // File operations
+  createFile(path: string, content: string): void;
+  updateFile(path: string, content: string): void;
+  getFile(path: string): VirtualFile | null;
+
+  // Instance operations
+  createInstance(parent: string, className: string, name: string): VirtualInstance;
+  setProperties(path: string, props: Record<string, any>): void;
+  deleteInstance(path: string): void;
+  getInstance(path: string): VirtualInstance | null;
+
+  // State
+  setActiveScript(path: string | null): void;
+  setSelection(paths: string[]): void;
+
+  // Context generation
+  getContext(): ChatContext;
+
+  // History
+  getChanges(): Change[];
+  exportState(): SerializedState;
+}
+```
+
+**Default State:**
+```typescript
+const DEFAULT_STATE = {
+  instances: new Map([
+    ['game', { className: 'DataModel', name: 'Game', ... }],
+    ['game.Workspace', { className: 'Workspace', name: 'Workspace', ... }],
+    ['game.ReplicatedStorage', { className: 'ReplicatedStorage', ... }],
+    ['game.ServerScriptService', { className: 'ServerScriptService', ... }],
+  ]),
+  files: new Map([
+    ['game.ServerScriptService.MainScript', {
+      path: 'game.ServerScriptService.MainScript',
+      content: '-- MainScript.lua\nprint("Hello, Vector!")\n',
+      language: 'lua'
+    }]
+  ]),
+  activeScript: 'game.ServerScriptService.MainScript',
+  selection: []
+};
+```
+
+---
+
+### 2. Agent Executor
+
+**File:** `lib/testing/runner/agent-executor.ts`
+
+Executes agent prompts with auto-approval.
+
+```typescript
+interface ExecutionResult {
+  prompt: string;
+  toolCalls: ToolCall[];
+  proposals: Proposal[];
+  changes: Change[];
+  finalState: SerializedState;
+  duration: number;
+  success: boolean;
+  error?: string;
+}
+
+interface ToolCall {
+  timestamp: number;
+  tool: string;
+  params: any;
+  result?: any;
+  duration: number;
+}
+
+class AgentExecutor {
+  constructor(private env: VirtualEnvironment) {}
+
+  async execute(prompt: string, options?: ExecuteOptions): Promise<ExecutionResult> {
+    const startTime = Date.now();
+    const toolCalls: ToolCall[] = [];
+    const proposals: Proposal[] = [];
+
+    // Get context from virtual env
+    const context = this.env.getContext();
+
+    // Call /api/chat
+    const response = await fetch('http://localhost:3000/api/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        projectId: 'test-env',
+        message: prompt,
+        context,
+        mode: 'agent',
+        autoApply: true // Auto-approve everything
+      })
+    });
+
+    // Parse streaming response
+    const reader = response.body!.getReader();
+    let buffer = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+
+      buffer += new TextDecoder().decode(value);
+      const lines = buffer.split('\n');
+      buffer = lines.pop() || '';
+
+      for (const line of lines) {
+        if (line.startsWith('data: ')) {
+          const data = JSON.parse(line.slice(6));
+
+          // Track tool calls
+          if (data.type === 'tool_call') {
+            toolCalls.push({
+              timestamp: Date.now(),
+              tool: data.tool,
+              params: data.params,
+              duration: 0
+            });
+          }
+
+          // Track proposals
+          if (data.type === 'proposal') {
+            proposals.push(data.proposal);
+
+            // Auto-apply
+            await this.applyProposal(data.proposal);
+          }
+        }
+      }
+    }
+
+    return {
+      prompt,
+      toolCalls,
+      proposals,
+      changes: this.env.getChanges(),
+      finalState: this.env.exportState(),
+      duration: Date.now() - startTime,
+      success: true
+    };
+  }
+
+  private async applyProposal(proposal: Proposal): Promise<void> {
+    switch (proposal.tool) {
+      case 'apply_edit':
+        this.env.updateFile(proposal.params.path, proposal.params.newContent);
+        break;
+      case 'create_instance':
+        this.env.createInstance(
+          proposal.params.parent,
+          proposal.params.className,
+          proposal.params.name
+        );
+        break;
+      case 'set_properties':
+        this.env.setProperties(proposal.params.path, proposal.params.properties);
+        break;
+      // ... other tools
+    }
+  }
+}
+```
+
+---
+
+### 3. Test Definitions
+
+**File:** `lib/testing/tests/tool-tests.ts`
+
+Individual tool tests.
+
+```typescript
+interface ToolTest {
+  name: string;
+  description: string;
+  tool: string;
+  prompt: string;
+  setup?: (env: VirtualEnvironment) => void;
+  verify: (result: ExecutionResult) => TestVerification;
+}
+
+interface TestVerification {
+  passed: boolean;
+  errors: string[];
+  warnings: string[];
+  details: string[];
+}
+
+export const TOOL_TESTS: ToolTest[] = [
+  {
+    name: 'get_active_script',
+    description: 'Agent should read the active script content',
+    tool: 'get_active_script',
+    prompt: 'What is in the current script?',
+    verify: (result) => {
+      const hasToolCall = result.toolCalls.some(c => c.tool === 'get_active_script');
+      return {
+        passed: hasToolCall,
+        errors: hasToolCall ? [] : ['Agent did not call get_active_script'],
+        warnings: [],
+        details: [`Tool calls: ${result.toolCalls.map(c => c.tool).join(', ')}`]
+      };
+    }
+  },
+
+  {
+    name: 'show_diff',
+    description: 'Agent should propose code changes with diff',
+    tool: 'show_diff',
+    prompt: 'Add a comment at the top that says "Testing Vector"',
+    verify: (result) => {
+      const hasDiff = result.toolCalls.some(c => c.tool === 'show_diff');
+      const hasEdit = result.changes.some(c => c.type === 'file_update');
+      const content = result.finalState.files.get('game.ServerScriptService.MainScript')?.content;
+      const hasComment = content?.includes('Testing Vector');
+
+      return {
+        passed: hasDiff && hasEdit && hasComment,
+        errors: [
+          !hasDiff && 'Agent did not call show_diff',
+          !hasEdit && 'No file changes applied',
+          !hasComment && 'Comment not found in code'
+        ].filter(Boolean) as string[],
+        warnings: [],
+        details: [
+          `Diff shown: ${hasDiff}`,
+          `Edit applied: ${hasEdit}`,
+          `Comment added: ${hasComment}`
+        ]
+      };
+    }
+  },
+
+  {
+    name: 'create_instance',
+    description: 'Agent should create a new instance',
+    tool: 'create_instance',
+    prompt: 'Create a Part in Workspace called TestPart',
+    verify: (result) => {
+      const hasCreate = result.toolCalls.some(c => c.tool === 'create_instance');
+      const partExists = result.finalState.instances.has('game.Workspace.TestPart');
+      const instance = result.finalState.instances.get('game.Workspace.TestPart');
+
+      return {
+        passed: hasCreate && partExists && instance?.className === 'Part',
+        errors: [
+          !hasCreate && 'Agent did not call create_instance',
+          !partExists && 'Part was not created',
+          instance?.className !== 'Part' && 'Wrong className'
+        ].filter(Boolean) as string[],
+        warnings: [],
+        details: [
+          `Instance created: ${partExists}`,
+          `ClassName: ${instance?.className || 'none'}`,
+          `Path: ${instance?.path || 'none'}`
+        ]
+      };
+    }
+  },
+
+  {
+    name: 'set_properties',
+    description: 'Agent should modify instance properties',
+    tool: 'set_properties',
+    prompt: 'Make the Part red',
+    setup: (env) => {
+      env.createInstance('game.Workspace', 'Part', 'TestPart');
+      env.setSelection(['game.Workspace.TestPart']);
+    },
+    verify: (result) => {
+      const hasSetProps = result.toolCalls.some(c => c.tool === 'set_properties');
+      const instance = result.finalState.instances.get('game.Workspace.TestPart');
+      const hasColor = instance?.properties?.Color !== undefined;
+
+      return {
+        passed: hasSetProps && hasColor,
+        errors: [
+          !hasSetProps && 'Agent did not call set_properties',
+          !hasColor && 'Color property not set'
+        ].filter(Boolean) as string[],
+        warnings: [],
+        details: [
+          `Properties set: ${hasSetProps}`,
+          `Color: ${JSON.stringify(instance?.properties?.Color)}`
+        ]
+      };
+    }
+  },
+
+  // ... tests for all other tools
+];
+```
+
+**File:** `lib/testing/tests/scenario-tests.ts`
+
+Real-world scenario tests.
+
+```typescript
+export const SCENARIO_TESTS: ScenarioTest[] = [
+  {
+    name: 'Create Blinking Part',
+    description: 'Multi-step task: create part, add script, make it blink',
+    prompt: 'Create a part that blinks between red and blue every second',
+    expectedTools: [
+      'create_instance',    // Create Part
+      'create_instance',    // Create Script in Part
+      'show_diff',          // Show script code
+      'apply_edit',         // Apply script
+      'set_properties'      // Set initial color
+    ],
+    verify: (result) => {
+      const partExists = result.finalState.instances.has('game.Workspace.Part');
+      const scriptExists = Array.from(result.finalState.files.keys())
+        .some(k => k.includes('Script'));
+      const scriptContent = Array.from(result.finalState.files.values())
+        .find(f => f.path.includes('Script'))?.content || '';
+      const hasBlinkLogic = scriptContent.includes('while') &&
+                           scriptContent.includes('Color3');
+
+      return {
+        passed: partExists && scriptExists && hasBlinkLogic,
+        errors: [
+          !partExists && 'Part not created',
+          !scriptExists && 'Script not created',
+          !hasBlinkLogic && 'Blinking logic not found in script'
+        ].filter(Boolean) as string[],
+        warnings: result.toolCalls.length > 10 ? ['Too many tool calls'] : [],
+        details: [
+          `Tool calls: ${result.toolCalls.length}`,
+          `Duration: ${result.duration}ms`,
+          `Files created: ${result.changes.filter(c => c.type === 'file_create').length}`,
+          `Instances created: ${result.changes.filter(c => c.type === 'instance_create').length}`
+        ]
+      };
+    }
+  },
+
+  {
+    name: 'Build Player Leaderboard',
+    description: 'Complex UI task: create GUI structure and script',
+    prompt: 'Create a leaderboard GUI that shows player names and scores',
+    expectedTools: [
+      'create_instance',    // ScreenGui
+      'create_instance',    // Frame
+      'create_instance',    // TextLabel (template)
+      'create_instance',    // Script
+      'set_properties',     // Multiple for positioning
+      'show_diff',          // Leaderboard logic
+      'apply_edit'
+    ],
+    verify: (result) => {
+      const guiExists = Array.from(result.finalState.instances.values())
+        .some(i => i.className === 'ScreenGui');
+      const frameExists = Array.from(result.finalState.instances.values())
+        .some(i => i.className === 'Frame');
+      const scriptExists = Array.from(result.finalState.files.values())
+        .some(f => f.content.includes('leaderboard') || f.content.includes('Leaderboard'));
+
+      return {
+        passed: guiExists && frameExists && scriptExists,
+        errors: [
+          !guiExists && 'ScreenGui not created',
+          !frameExists && 'Frame not created',
+          !scriptExists && 'Leaderboard script not found'
+        ].filter(Boolean) as string[],
+        warnings: [],
+        details: [
+          `GUI instances: ${Array.from(result.finalState.instances.values()).filter(i => i.className.includes('Gui') || i.className.includes('Frame') || i.className.includes('Label')).length}`,
+          `Tool calls: ${result.toolCalls.length}`,
+          `Duration: ${result.duration}ms`
+        ]
+      };
+    }
+  }
+];
+```
+
+---
+
+### 4. Test Runner
+
+**File:** `lib/testing/runner/test-runner.ts`
+
+Main test execution logic.
+
+```typescript
+interface TestRunOptions {
+  filter?: string;          // Run specific tests
+  verbose?: boolean;        // Show detailed output
+  saveResults?: boolean;    // Save to test-results/
+  timeout?: number;         // Per-test timeout
+}
+
+interface TestRunResult {
+  totalTests: number;
+  passed: number;
+  failed: number;
+  skipped: number;
+  duration: number;
+  results: TestResult[];
+}
+
+interface TestResult {
+  test: string;
+  passed: boolean;
+  duration: number;
+  errors: string[];
+  warnings: string[];
+  execution: ExecutionResult;
+}
+
+class TestRunner {
+  async run(options: TestRunOptions = {}): Promise<TestRunResult> {
+    console.log('🧪 Vector Agent Test Runner\n');
+
+    const allTests = [...TOOL_TESTS, ...SCENARIO_TESTS];
+    const tests = options.filter
+      ? allTests.filter(t => t.name.includes(options.filter))
+      : allTests;
+
+    const results: TestResult[] = [];
+    const startTime = Date.now();
+
+    for (const test of tests) {
+      console.log(`\n▶ Running: ${test.name}`);
+      console.log(`  ${test.description}`);
+
+      try {
+        const result = await this.runTest(test, options);
+        results.push(result);
+
+        if (result.passed) {
+          console.log(`  ✅ PASSED (${result.duration}ms)`);
+        } else {
+          console.log(`  ❌ FAILED (${result.duration}ms)`);
+          result.errors.forEach(e => console.log(`     - ${e}`));
+        }
+
+        if (options.verbose) {
+          this.printDetails(result);
+        }
+
+      } catch (error) {
+        console.log(`  💥 ERROR: ${error}`);
+        results.push({
+          test: test.name,
+          passed: false,
+          duration: 0,
+          errors: [String(error)],
+          warnings: [],
+          execution: {} as any
+        });
+      }
+    }
+
+    const summary = this.generateSummary(results, Date.now() - startTime);
+    this.printSummary(summary);
+
+    if (options.saveResults) {
+      await this.saveResults(summary);
+    }
+
+    return summary;
+  }
+
+  private async runTest(test: ToolTest | ScenarioTest, options: TestRunOptions): Promise<TestResult> {
+    // Create fresh virtual environment
+    const env = new VirtualEnvironment();
+
+    // Run setup if provided
+    if (test.setup) {
+      test.setup(env);
+    }
+
+    // Execute agent
+    const executor = new AgentExecutor(env);
+    const execution = await executor.execute(test.prompt, {
+      timeout: options.timeout || 30000
+    });
+
+    // Verify results
+    const verification = test.verify(execution);
+
+    return {
+      test: test.name,
+      passed: verification.passed,
+      duration: execution.duration,
+      errors: verification.errors,
+      warnings: verification.warnings,
+      execution
+    };
+  }
+
+  private printDetails(result: TestResult): void {
+    console.log(`\n  📋 Tool Calls:`);
+    result.execution.toolCalls.forEach(tc => {
+      console.log(`     - ${tc.tool}(${JSON.stringify(tc.params).slice(0, 50)}...)`);
+    });
+
+    console.log(`\n  📝 Changes:`);
+    result.execution.changes.forEach(ch => {
+      console.log(`     - ${ch.type}: ${ch.target}`);
+    });
+
+    if (result.execution.proposals.length > 0) {
+      console.log(`\n  💡 Proposals:`);
+      result.execution.proposals.forEach(p => {
+        console.log(`     - ${p.tool} (${p.id})`);
+      });
+    }
+  }
+
+  private printSummary(summary: TestRunResult): void {
+    console.log('\n' + '='.repeat(60));
+    console.log('📊 Test Summary');
+    console.log('='.repeat(60));
+    console.log(`Total:   ${summary.totalTests}`);
+    console.log(`Passed:  ${summary.passed} ✅`);
+    console.log(`Failed:  ${summary.failed} ❌`);
+    console.log(`Time:    ${summary.duration}ms`);
+    console.log('='.repeat(60));
+  }
+
+  private async saveResults(summary: TestRunResult): Promise<void> {
+    const timestamp = new Date().toISOString();
+
+    // Save JSON
+    await writeFile(
+      'test-results/latest.json',
+      JSON.stringify(summary, null, 2)
+    );
+
+    // Generate HTML report
+    const html = this.generateHtmlReport(summary);
+    await writeFile('test-results/latest.html', html);
+
+    console.log('\n💾 Results saved to test-results/');
+  }
+}
+```
+
+---
+
+### 5. CLI Entry Point
+
+**File:** `scripts/test-agent.ts`
+
+Command-line interface.
+
+```typescript
+#!/usr/bin/env ts-node
+
+import { TestRunner } from '../lib/testing/runner/test-runner';
+
+async function main() {
+  const args = process.argv.slice(2);
+
+  const options = {
+    filter: args.find(a => a.startsWith('--filter='))?.split('=')[1],
+    verbose: args.includes('--verbose') || args.includes('-v'),
+    saveResults: !args.includes('--no-save'),
+    timeout: parseInt(args.find(a => a.startsWith('--timeout='))?.split('=')[1] || '30000')
+  };
+
+  const runner = new TestRunner();
+  const results = await runner.run(options);
+
+  process.exit(results.failed > 0 ? 1 : 0);
+}
+
+main().catch(console.error);
+```
+
+**Add to package.json:**
+```json
+{
+  "scripts": {
+    "test:agent": "ts-node scripts/test-agent.ts",
+    "test:agent:verbose": "ts-node scripts/test-agent.ts --verbose",
+    "test:agent:tools": "ts-node scripts/test-agent.ts --filter=get_",
+    "test:agent:scenarios": "ts-node scripts/test-agent.ts --filter=Create"
+  }
+}
+```
+
+---
+
+## Output Examples
+
+### Terminal Output (Normal)
+
+```
+🧪 Vector Agent Test Runner
+
+▶ Running: get_active_script
+  Agent should read the active script content
+  ✅ PASSED (1234ms)
+
+▶ Running: show_diff
+  Agent should propose code changes with diff
+  ✅ PASSED (2156ms)
+
+▶ Running: create_instance
+  Agent should create a new instance
+  ✅ PASSED (1876ms)
+
+▶ Running: Create Blinking Part
+  Multi-step task: create part, add script, make it blink
+  ✅ PASSED (4521ms)
+
+============================================================
+📊 Test Summary
+============================================================
+Total:   13
+Passed:  12 ✅
+Failed:  1 ❌
+Time:    28453ms
+============================================================
+
+💾 Results saved to test-results/
+```
+
+### Terminal Output (Verbose)
+
+```
+▶ Running: create_instance
+  Agent should create a new instance
+
+  📋 Tool Calls:
+     - get_active_script({})
+     - create_instance({"parent":"game.Workspace","clas...})
+     - set_properties({"path":"game.Workspace.TestPart"...})
+
+  📝 Changes:
+     - instance_create: game.Workspace.TestPart
+     - property_set: game.Workspace.TestPart
+
+  💡 Proposals:
+     - create_instance (prop_001)
+     - set_properties (prop_002)
+
+  ✅ PASSED (1876ms)
+```
+
+### JSON Report
+
+```json
+{
+  "totalTests": 13,
+  "passed": 12,
+  "failed": 1,
+  "duration": 28453,
+  "results": [
+    {
+      "test": "create_instance",
+      "passed": true,
+      "duration": 1876,
+      "errors": [],
+      "warnings": [],
+      "execution": {
+        "prompt": "Create a Part in Workspace called TestPart",
+        "toolCalls": [
+          {
+            "timestamp": 1699564321000,
+            "tool": "create_instance",
+            "params": {
+              "parent": "game.Workspace",
+              "className": "Part",
+              "name": "TestPart"
+            },
+            "duration": 234
+          }
+        ],
+        "changes": [
+          {
+            "type": "instance_create",
+            "target": "game.Workspace.TestPart",
+            "after": { "className": "Part", "name": "TestPart" }
+          }
+        ],
+        "finalState": { /* ... */ }
+      }
+    }
+  ]
+}
+```
+
+### HTML Report
+
+```html
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Vector Agent Test Results</title>
+  <style>/* Tailwind-like styles */</style>
+</head>
+<body>
+  <h1>Test Results</h1>
+  <div class="summary">
+    <span class="passed">12 Passed</span>
+    <span class="failed">1 Failed</span>
+  </div>
+
+  <div class="test passed">
+    <h2>✅ create_instance</h2>
+    <p>Duration: 1876ms</p>
+
+    <h3>Tool Calls</h3>
+    <pre>create_instance({ parent: "game.Workspace", ... })</pre>
+
+    <h3>Generated Code</h3>
+    <pre class="diff">
+      <span class="add">+ local part = Instance.new("Part")</span>
+      <span class="add">+ part.Parent = workspace</span>
+    </pre>
+  </div>
+</body>
+</html>
+```
+
+---
+
+## Usage
+
+### Run All Tests
+```bash
+npm run test:agent
+```
+
+### Run Specific Test
+```bash
+npm run test:agent -- --filter=create_instance
+```
+
+### Run with Verbose Output
+```bash
+npm run test:agent -- --verbose
+```
+
+### Run Only Tool Tests
+```bash
+npm run test:agent:tools
+```
+
+### Run Only Scenarios
+```bash
+npm run test:agent:scenarios
+```
+
+### Custom Timeout
+```bash
+npm run test:agent -- --timeout=60000
 ```
 
 ---
 
 ## Implementation Plan
 
-### Phase 1: Core Infrastructure (Est. 30 min)
+### Phase 1: Virtual Environment (30 min)
+- [ ] Create `VirtualEnvironment` class
+- [ ] Implement file operations
+- [ ] Implement instance operations
+- [ ] Create default state
+- [ ] Add context generation
 
-**Goal:** Basic mock state and UI skeleton
+### Phase 2: Agent Executor (30 min)
+- [ ] Create `AgentExecutor` class
+- [ ] Implement `/api/chat` integration
+- [ ] Add streaming response parser
+- [ ] Implement proposal auto-apply
+- [ ] Track tool calls and changes
 
-- [ ] Create `MockStudioStateManager` class
-  - [ ] File operations (create, update, delete, get)
-  - [ ] Instance operations (create, delete, set props, rename)
-  - [ ] State management (active script, selection)
-  - [ ] Default state with sample files
+### Phase 3: Test Definitions (45 min)
+- [ ] Write 11 individual tool tests
+- [ ] Write 2 scenario tests
+- [ ] Add verification logic for each
+- [ ] Create test fixtures
 
-- [ ] Create `mock-context.ts` provider
-  - [ ] Convert state → ChatContext format
-  - [ ] Handle null/undefined cases
+### Phase 4: Test Runner (30 min)
+- [ ] Create `TestRunner` class
+- [ ] Implement test execution loop
+- [ ] Add terminal output formatting
+- [ ] Add summary generation
 
-- [ ] Create basic page layout
-  - [ ] Split screen: Studio panel (left) + Agent panel (right)
-  - [ ] Responsive design with Tailwind
+### Phase 5: Reports & CLI (30 min)
+- [ ] Create JSON report generator
+- [ ] Create HTML report generator
+- [ ] Build CLI entry point
+- [ ] Add npm scripts
+- [ ] Test end-to-end
 
-**Deliverable:** Empty UI with state manager working
-
----
-
-### Phase 2: Mock Studio UI (Est. 45 min)
-
-**Goal:** Functional Studio simulation
-
-- [ ] `MockExplorer` component
-  - [ ] Render instance tree recursively
-  - [ ] Click to select file/instance
-  - [ ] Highlight active/selected items
-  - [ ] Icons for different instance types
-
-- [ ] `MockScriptEditor` component
-  - [ ] Display active script content
-  - [ ] Editable textarea with syntax highlighting (optional)
-  - [ ] Auto-save on change
-  - [ ] Line numbers (optional)
-
-- [ ] `PropertiesPanel` component
-  - [ ] Show selected instance properties
-  - [ ] Editable property values
-  - [ ] Property type formatting
-
-- [ ] `OutputConsole` component
-  - [ ] Display logs with timestamps
-  - [ ] Color-coded by level (info, warn, error)
-  - [ ] Auto-scroll to bottom
-  - [ ] Clear button
-
-**Deliverable:** Working mock Studio with file editing
+**Total Time:** ~2.5 hours
 
 ---
 
-### Phase 3: Agent Integration (Est. 45 min)
-
-**Goal:** Connect to existing `/api/chat` endpoint
-
-- [ ] `AgentChat` component
-  - [ ] Message list with user/agent messages
-  - [ ] Input box with send button
-  - [ ] Streaming response handling
-  - [ ] Loading state
-
-- [ ] Chat → API integration
-  - [ ] Gather context from mock state
-  - [ ] POST to `/api/chat`
-  - [ ] Stream response via fetch + ReadableStream
-  - [ ] Parse JSON lines for proposals
-
-- [ ] `ProposalCard` component
-  - [ ] Display proposal details
-  - [ ] Show diff for `show_diff`
-  - [ ] Show parameters for other tools
-  - [ ] Approve/Reject buttons
-  - [ ] Status (pending, approved, rejected)
-
-- [ ] `ProposalApplier` class
-  - [ ] Implement `applyProposal` method
-  - [ ] Handle each tool type
-  - [ ] Apply text edits
-  - [ ] Create/modify instances
-  - [ ] Error handling + rollback
-
-**Deliverable:** End-to-end chat → proposal → apply flow
-
----
-
-### Phase 4: Debugging Tools (Est. 30 min)
-
-**Goal:** Developer experience improvements
-
-- [ ] `ToolCallLog` component
-  - [ ] Log all tool calls with timestamps
-  - [ ] Show parameters + results
-  - [ ] Expandable details
-  - [ ] Filter by tool type
-
-- [ ] `StateInspector` component (debug panel)
-  - [ ] Show current state as JSON
-  - [ ] Export/import state
-  - [ ] Reset to default
-  - [ ] View context sent to API
-
-- [ ] History (undo/redo)
-  - [ ] Create snapshots on each change
-  - [ ] Undo/redo buttons
-  - [ ] History timeline
-  - [ ] Restore to snapshot
-
-- [ ] Keyboard shortcuts
-  - [ ] `Ctrl+Z` → Undo
-  - [ ] `Ctrl+Y` → Redo
-  - [ ] `Ctrl+Enter` → Send message
-
-**Deliverable:** Full debugging capabilities
-
----
-
-### Phase 5: Polish & Testing (Est. 30 min)
-
-**Goal:** Production-ready testing environment
-
-- [ ] Styling
-  - [ ] Consistent color scheme
-  - [ ] Icons for instance types
-  - [ ] Hover states
-  - [ ] Loading indicators
-
-- [ ] Error handling
-  - [ ] Display API errors
-  - [ ] Toast notifications
-  - [ ] Validation messages
-
-- [ ] Presets
-  - [ ] Sample scenarios (e.g., "Create a part", "Add a script")
-  - [ ] Quick actions menu
-  - [ ] Templates for common tasks
-
-- [ ] Documentation
-  - [ ] In-app help tooltips
-  - [ ] Keyboard shortcut reference
-  - [ ] Example prompts
-
-**Deliverable:** Polished, user-friendly testing environment
-
----
-
-## API Reference
-
-### MockStudioStateManager
-
-#### Constructor
-```typescript
-new MockStudioStateManager(initialState?: Partial<MockStudioState>)
-```
-
-#### File Methods
-```typescript
-createFile(path: string, content: string, language?: 'lua' | 'luau'): void
-updateFile(path: string, content: string): void
-deleteFile(path: string): void
-getFile(path: string): ScriptFile | null
-getAllFiles(): ScriptFile[]
-```
-
-#### Instance Methods
-```typescript
-createInstance(
-  parent: string,
-  className: string,
-  name: string,
-  properties?: Record<string, any>
-): MockInstance
-
-deleteInstance(path: string): void
-setProperties(path: string, props: Record<string, any>): void
-renameInstance(path: string, newName: string): void
-getInstance(path: string): MockInstance | null
-getChildren(path: string): MockInstance[]
-```
-
-#### State Methods
-```typescript
-setActiveScript(path: string | null): void
-getActiveScript(): ScriptFile | null
-setSelection(paths: string[]): void
-getSelection(): MockInstance[]
-```
-
-#### History Methods
-```typescript
-createSnapshot(description: string): void
-undo(): boolean
-redo(): boolean
-canUndo(): boolean
-canRedo(): boolean
-getHistory(): StateSnapshot[]
-```
-
-#### Logging Methods
-```typescript
-log(level: 'info' | 'warn' | 'error', message: string): void
-clearLogs(): void
-getLogs(): LogEntry[]
-```
-
-#### Serialization Methods
-```typescript
-exportState(): SerializedState
-importState(state: SerializedState): void
-reset(): void
-```
-
----
-
-### ProposalApplier
-
-#### Constructor
-```typescript
-new ProposalApplier(state: MockStudioStateManager)
-```
-
-#### Methods
-```typescript
-async applyProposal(proposal: Proposal): Promise<ApplyResult>
-
-interface ApplyResult {
-  success: boolean;
-  error?: string;
-  changes?: string[]; // Descriptions of changes made
-}
-```
-
----
-
-## Usage Examples
-
-### Example 1: Basic Setup
-
-```tsx
-// app/test-studio/page.tsx
-'use client';
-
-import { useState } from 'react';
-import { MockStudioStateManager } from '@/lib/testing/mock-studio-state';
-import { MockExplorer } from '@/components/test-studio/MockExplorer';
-import { AgentChat } from '@/components/test-studio/AgentChat';
-
-export default function TestStudioPage() {
-  const [state] = useState(() => new MockStudioStateManager());
-
-  return (
-    <div className="grid grid-cols-2 gap-4 h-screen p-4">
-      <div>
-        <MockExplorer state={state} />
-      </div>
-      <div>
-        <AgentChat state={state} />
-      </div>
-    </div>
-  );
-}
-```
-
-### Example 2: Applying Proposals
-
-```tsx
-const applier = new ProposalApplier(state);
-
-async function handleApprove(proposal: Proposal) {
-  const result = await applier.applyProposal(proposal);
-
-  if (result.success) {
-    state.log('info', `Applied ${proposal.tool}`);
-    toast.success('Proposal applied!');
-  } else {
-    state.log('error', `Failed to apply: ${result.error}`);
-    toast.error(result.error);
-  }
-}
-```
-
-### Example 3: Exporting State
-
-```tsx
-function ExportButton({ state }: { state: MockStudioStateManager }) {
-  function handleExport() {
-    const exported = state.exportState();
-    const json = JSON.stringify(exported, null, 2);
-
-    // Download as file
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `mock-state-${Date.now()}.json`;
-    a.click();
-  }
-
-  return <button onClick={handleExport}>Export State</button>;
-}
-```
-
----
-
-## Testing Scenarios
-
-### Scenario 1: Simple Code Edit
-
-**Goal:** Test `show_diff` → `apply_edit` flow
-
-1. **Setup**: Default state with MainScript.lua
-2. **Prompt**: "Add a print statement that says 'Vector is working!'"
-3. **Expected**:
-   - Agent calls `get_active_script`
-   - Agent calls `show_diff` with new print statement
-   - User approves
-   - Editor updates with new code
-   - Log shows "Applied edits to MainScript.lua"
-
-### Scenario 2: Create Instance
-
-**Goal:** Test instance creation
-
-1. **Setup**: Default state
-2. **Prompt**: "Create a new Part in Workspace called TestPart"
-3. **Expected**:
-   - Agent calls `create_instance`
-   - Proposal shows: parent=Workspace, className=Part, name=TestPart
-   - User approves
-   - Explorer updates with new Part under Workspace
-   - Selection changes to new Part
-
-### Scenario 3: Multi-Step Task
-
-**Goal:** Test agent mode with multiple tools
-
-1. **Setup**: Default state
-2. **Prompt**: "Create a script that makes a part blink red and blue"
-3. **Expected**:
-   - Agent creates Part
-   - Agent creates Script in Part
-   - Agent shows diff for script content
-   - Agent sets Part Color property
-   - All proposals applied in sequence
-   - Log shows complete history
-
-### Scenario 4: Error Handling
-
-**Goal:** Test validation and error recovery
-
-1. **Setup**: Default state
-2. **Prompt**: "Delete a non-existent script"
-3. **Expected**:
-   - Agent tries to find script
-   - Agent reports error: "Script not found"
-   - No state changes
-   - Error logged in console
-
-### Scenario 5: Undo/Redo
-
-**Goal:** Test history management
-
-1. **Setup**: Default state
-2. **Actions**:
-   - Create instance (snapshot)
-   - Edit script (snapshot)
-   - Delete instance (snapshot)
-3. **Expected**:
-   - Click Undo → instance restored
-   - Click Undo → script reverted
-   - Click Undo → back to default
-   - Click Redo → forward through history
-
----
-
-## Advanced Features (Future)
-
-### Performance Testing
-- [ ] Measure agent response times
-- [ ] Track context size over conversations
-- [ ] Monitor cache hit rates
-- [ ] Profile tool execution
-
-### Visual Debugging
-- [ ] Syntax highlighting in editor
-- [ ] Diff gutter in editor
-- [ ] Breakpoints for tool calls
-- [ ] Step-through mode
-
-### Collaboration
-- [ ] Share mock states via URL
-- [ ] Export conversation history
-- [ ] Compare states (diff viewer)
-- [ ] Replay tool calls
-
-### AI Enhancements
-- [ ] Test streaming performance improvements
-- [ ] Test context caching effectiveness
-- [ ] Test multi-file operations
-- [ ] Test error recovery flows
-
----
-
-## FAQ
-
-**Q: Does this replace the actual plugin?**
-A: No, this is for development/testing only. The real plugin still runs in Roblox Studio.
-
-**Q: Can I test the actual Roblox API?**
-A: No, this mocks the environment. It's for testing agent logic, not Roblox APIs.
-
-**Q: How do I add custom instance types?**
-A: Edit `default-state.ts` and add to the `instances` map with proper className.
-
-**Q: Can I test performance improvements here?**
-A: Yes! This is perfect for testing streaming, caching, error handling, etc.
-
-**Q: How do I debug why a proposal failed?**
-A: Check the ToolCallLog, inspect the state via StateInspector, and look at browser console.
-
----
-
-## Troubleshooting
-
-### Chat doesn't connect
-- Check `/api/chat` endpoint is running
-- Verify context format matches API schema
-- Check browser console for fetch errors
-
-### Proposals don't apply
-- Check ProposalApplier error logs
-- Verify file paths exist in mock state
-- Ensure proper instance hierarchy
-
-### UI doesn't update
-- Check React state updates
-- Verify state manager methods called
-- Look for console errors
-
-### Performance issues
-- Check state size (too many instances?)
-- Profile React renders
-- Optimize re-renders with `useMemo`
+## Success Criteria
+
+✅ All 11 tool tests pass
+✅ Both scenario tests pass
+✅ Detailed output for debugging
+✅ JSON + HTML reports generated
+✅ Can run from command line
+✅ Tests complete in < 60 seconds
+✅ No manual intervention needed
 
 ---
 
 ## Next Steps
 
-1. **Build Phase 1**: Core infrastructure
-2. **Test basic flow**: Create file → Edit → Chat
-3. **Build Phase 2**: Complete UI
-4. **Test agent**: Run through scenarios
-5. **Build Phase 3**: Integrate proposals
-6. **Test end-to-end**: Full workflow
-7. **Polish**: Add debugging tools
-8. **Document**: Add examples and screenshots
+1. Build Phase 1 (Virtual Environment)
+2. Test with simple prompt
+3. Build Phase 2 (Agent Executor)
+4. Test full execution flow
+5. Build Phase 3 (Test Definitions)
+6. Run first complete test
+7. Build Phase 4 (Test Runner)
+8. Build Phase 5 (Reports)
+9. Polish and document
 
 ---
 
-**Ready to start implementation!** 🚀
+**Ready to build!** 🚀
