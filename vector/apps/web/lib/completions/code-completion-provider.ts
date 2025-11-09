@@ -17,7 +17,7 @@ export interface Range {
   end: Position;
 }
 
-export interface Context {
+export interface CompletionContext {
   currentFile: string;
   currentPosition: Position;
   prefix: string;
@@ -69,17 +69,17 @@ export interface CodeCompletionProvider {
   /**
    * Get inline completions at a specific position
    */
-  getInlineCompletions(position: Position, context: Context): Promise<Completion[]>;
+  getInlineCompletions(position: Position, context: CompletionContext): Promise<Completion[]>;
 
   /**
    * Get contextual suggestions based on prefix and context
    */
-  getContextualSuggestions(prefix: string, context: Context): Promise<Suggestion[]>;
+  getContextualSuggestions(prefix: string, context: CompletionContext): Promise<Suggestion[]>;
 
   /**
    * Predict the next line of code
    */
-  predictNextLine(context: Context): Promise<string | null>;
+  predictNextLine(context: CompletionContext): Promise<string | null>;
 }
 
 /**
@@ -98,7 +98,7 @@ export class HybridEditor {
    * Get suggestions based on input complexity
    * Simple edits return inline suggestions, complex changes return proposals
    */
-  async getSuggestions(input: string, context: Context): Promise<Suggestion[]> {
+  async getSuggestions(input: string, context: CompletionContext): Promise<Suggestion[]> {
     const complexity = this.analyzeComplexity(input, context);
 
     if (complexity === 'simple') {
@@ -133,7 +133,7 @@ export class HybridEditor {
   /**
    * Analyze input complexity to determine handling strategy
    */
-  private analyzeComplexity(input: string, context: Context): 'simple' | 'complex' {
+  private analyzeComplexity(input: string, context: CompletionContext): 'simple' | 'complex' {
     // Simple edit indicators
     const simpleIndicators = [
       input.length < 50, // Short input
@@ -178,7 +178,7 @@ export class LLMCodeCompletionProvider implements CodeCompletionProvider {
    */
   async getInlineCompletions(
     position: Position,
-    context: Context
+    context: CompletionContext
   ): Promise<Completion[]> {
     // Check cache first
     const cacheKey = this.getCacheKey(position, context);
@@ -208,7 +208,7 @@ export class LLMCodeCompletionProvider implements CodeCompletionProvider {
    */
   async getContextualSuggestions(
     prefix: string,
-    context: Context
+    context: CompletionContext
   ): Promise<Suggestion[]> {
     const prompt = `Given the context:\n${context.prefix}\n\nSuggest the next code based on: ${prefix}`;
 
@@ -235,7 +235,7 @@ export class LLMCodeCompletionProvider implements CodeCompletionProvider {
   /**
    * Predict the next line of code
    */
-  async predictNextLine(context: Context): Promise<string | null> {
+  async predictNextLine(context: CompletionContext): Promise<string | null> {
     const prompt = this.buildNextLinePrompt(context);
 
     try {
@@ -255,7 +255,7 @@ export class LLMCodeCompletionProvider implements CodeCompletionProvider {
   /**
    * Build completion prompt from context
    */
-  private buildCompletionPrompt(context: Context): string {
+  private buildCompletionPrompt(context: CompletionContext): string {
     return `Complete the following ${context.projectContext?.language || 'Lua'} code:
 
 File: ${context.currentFile}
@@ -280,7 +280,7 @@ Return completions in JSON format:
   /**
    * Build next line prediction prompt
    */
-  private buildNextLinePrompt(context: Context): string {
+  private buildNextLinePrompt(context: CompletionContext): string {
     return `Predict the next line of ${context.projectContext?.language || 'Lua'} code:
 
 ${context.prefix}
@@ -292,7 +292,7 @@ ${context.prefix}
    */
   private async fetchCompletions(
     prompt: string,
-    context: Context
+    context: CompletionContext
   ): Promise<Completion[]> {
     const response = await this.callLLM(prompt, {
       temperature: 0.4,
@@ -360,7 +360,7 @@ ${context.prefix}
   /**
    * Generate cache key for memoization
    */
-  private getCacheKey(position: Position, context: Context): string {
+  private getCacheKey(position: Position, context: CompletionContext): string {
     return `${context.currentFile}:${position.line}:${position.character}:${context.prefix.slice(-50)}`;
   }
 
@@ -448,7 +448,7 @@ export class PatternBasedCompletionProvider implements CodeCompletionProvider {
 
   async getInlineCompletions(
     position: Position,
-    context: Context
+    context: CompletionContext
   ): Promise<Completion[]> {
     const completions: Completion[] = [];
 
@@ -472,7 +472,7 @@ export class PatternBasedCompletionProvider implements CodeCompletionProvider {
 
   async getContextualSuggestions(
     prefix: string,
-    context: Context
+    context: CompletionContext
   ): Promise<Suggestion[]> {
     const completions = await this.getInlineCompletions(context.currentPosition, context);
 
@@ -484,7 +484,7 @@ export class PatternBasedCompletionProvider implements CodeCompletionProvider {
     }));
   }
 
-  async predictNextLine(context: Context): Promise<string | null> {
+  async predictNextLine(context: CompletionContext): Promise<string | null> {
     // Simple heuristic: if line ends with 'then' or 'do', suggest indent
     if (context.prefix.trimEnd().endsWith('then') || context.prefix.trimEnd().endsWith('do')) {
       return '\t';

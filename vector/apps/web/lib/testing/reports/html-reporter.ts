@@ -396,10 +396,15 @@ export class HTMLReporter {
    * @returns Escaped text
    */
   private static escapeHTML(text: string): string {
-    const div = { textContent: text } as any;
-    const element = document.createElement ? document.createElement('div') : div;
-    element.textContent = text;
-    return element.innerHTML || text
+    // Use DOM in browser, regex in Node.js
+    if (typeof document !== 'undefined' && document.createElement) {
+      const element = document.createElement('div');
+      element.textContent = text;
+      return element.innerHTML;
+    }
+
+    // Fallback for Node.js environment
+    return text
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
       .replace(/>/g, '&gt;')

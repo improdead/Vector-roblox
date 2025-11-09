@@ -7,6 +7,8 @@
  * moving code between files, and updating references automatically.
  */
 
+import fs from 'fs';
+
 export interface Edit {
   start: { line: number; character: number };
   end: { line: number; character: number };
@@ -589,19 +591,17 @@ export class MultiFileEditExecutor {
   }
 
   /**
-   * Read file content (stub - implement with actual file system)
+   * Read file content
    */
   private async readFile(path: string): Promise<string> {
-    // In real implementation, use fs.readFile or similar
-    throw new Error(`readFile not implemented: ${path}`);
+    return fs.readFileSync(path, 'utf-8');
   }
 
   /**
-   * Write file content (stub - implement with actual file system)
+   * Write file content
    */
   private async writeFile(path: string, content: string): Promise<void> {
-    // In real implementation, use fs.writeFile or similar
-    throw new Error(`writeFile not implemented: ${path}, ${content}`);
+    fs.writeFileSync(path, content, 'utf-8');
   }
 
   /**

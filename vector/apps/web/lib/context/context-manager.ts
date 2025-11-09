@@ -85,6 +85,10 @@ export class ContextManager {
   private preloadQueue: Set<string> = new Set();
   private isPreloading: boolean = false;
 
+  // Cache statistics
+  private cacheHits: number = 0;
+  private cacheMisses: number = 0;
+
   /**
    * Get context with intelligent caching
    */
@@ -93,14 +97,16 @@ export class ContextManager {
     if (!request.forceRefresh) {
       const cached = this.contextCache.get(request.key);
       if (cached && this.isStillRelevant(cached, request.maxAge)) {
-        // Update access metadata
+        // Cache hit
+        this.cacheHits++;
         cached.accessCount++;
         cached.lastAccess = Date.now();
         return cached.context;
       }
     }
 
-    // Gather fresh context
+    // Cache miss - gather fresh context
+    this.cacheMisses++;
     const context = await this.gatherFreshContext(request);
 
     // Cache the result
@@ -509,9 +515,8 @@ export class ContextManager {
     entries: number;
     hitRate: number;
   } {
-    const entries = Array.from(this.contextCache.values());
-    const totalAccesses = entries.reduce((sum, e) => sum + e.accessCount, 0);
-    const hitRate = totalAccesses > 0 ? entries.length / totalAccesses : 0;
+    const totalAccesses = this.cacheHits + this.cacheMisses;
+    const hitRate = totalAccesses > 0 ? this.cacheHits / totalAccesses : 0;
 
     return {
       size: this.currentCacheSize,
