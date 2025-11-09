@@ -368,7 +368,11 @@ ${context.prefix}
    * Parse completion kind from string
    */
   private parseCompletionKind(kind: string): CompletionKind {
-    return (CompletionKind as any)[kind] || CompletionKind.Text;
+    const allKinds = Object.values(CompletionKind) as string[];
+    if (allKinds.includes(kind)) {
+      return kind as CompletionKind;
+    }
+    return CompletionKind.Text;
   }
 }
 

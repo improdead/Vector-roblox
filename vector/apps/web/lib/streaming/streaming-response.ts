@@ -296,9 +296,12 @@ export class OpenRouterStreamingProvider implements StreamingProvider {
         }
       }
 
-      const final = response.getCurrentResponse();
-      response.emitComplete(final);
-      if (options.onComplete) options.onComplete(final);
+      // Only emit completion if not cancelled
+      if (!response.isCancelled()) {
+        const final = response.getCurrentResponse();
+        response.emitComplete(final);
+        if (options.onComplete) options.onComplete(final);
+      }
 
     } catch (error) {
       if (!response.isCancelled()) {

@@ -377,26 +377,32 @@ export class CodeIntelligence {
    * Resolve dependencies and order files for safe processing
    */
   resolveDependencyOrder(files: FileEdit[]): FileEdit[] {
-    const graph = new Map<string, Set<string>>();
+    // Build adjacency list: dependency -> dependents
+    const adjacency = new Map<string, Set<string>>();
     const inDegree = new Map<string, number>();
 
-    // Initialize graph
+    // Initialize all nodes
     for (const file of files) {
-      graph.set(file.path, new Set(file.dependencies || []));
+      adjacency.set(file.path, new Set());
       inDegree.set(file.path, 0);
     }
 
-    // Calculate in-degrees
-    for (const [_file, deps] of graph) {
-      for (const dep of deps) {
-        inDegree.set(dep, (inDegree.get(dep) || 0) + 1);
+    // Build graph edges and calculate in-degrees
+    for (const file of files) {
+      for (const dep of file.dependencies ?? []) {
+        if (!adjacency.has(dep)) {
+          continue; // Skip dependencies not in the file list
+        }
+        adjacency.get(dep)!.add(file.path);
+        inDegree.set(file.path, (inDegree.get(file.path) || 0) + 1);
       }
     }
 
-    // Topological sort
+    // Topological sort (Kahn's algorithm)
     const queue: string[] = [];
     const result: FileEdit[] = [];
 
+    // Start with nodes that have no dependencies
     for (const [file, degree] of inDegree) {
       if (degree === 0) {
         queue.push(file);
@@ -408,14 +414,21 @@ export class CodeIntelligence {
       const fileEdit = files.find(f => f.path === current);
       if (fileEdit) result.push(fileEdit);
 
-      const deps = graph.get(current) || new Set();
-      for (const dep of deps) {
-        const newDegree = (inDegree.get(dep) || 1) - 1;
-        inDegree.set(dep, newDegree);
+      const dependents = adjacency.get(current);
+      if (!dependents) continue;
+
+      for (const dependent of dependents) {
+        const newDegree = (inDegree.get(dependent) || 1) - 1;
+        inDegree.set(dependent, newDegree);
         if (newDegree === 0) {
-          queue.push(dep);
+          queue.push(dependent);
         }
       }
+    }
+
+    // Check for cycles
+    if (result.length !== files.length) {
+      throw new Error('Circular dependency detected in multi-file edit');
     }
 
     return result;
@@ -518,15 +531,15 @@ export class MultiFileEditExecutor {
       return b.start.character - a.start.character;
     });
 
-    const lines = content.split('\n');
+    // Use position-to-offset approach for multi-line edits
     for (const edit of sortedEdits) {
-      lines[edit.start.line] =
-        lines[edit.start.line].slice(0, edit.start.character) +
+      const startOffset = this.positionToOffset(content, edit.start);
+      const endOffset = this.positionToOffset(content, edit.end);
+      content =
+        content.slice(0, startOffset) +
         edit.text +
-        lines[edit.end.line].slice(edit.end.character);
+        content.slice(endOffset);
     }
-
-    content = lines.join('\n');
 
     // Validate afterHash if provided
     if (fileEdit.afterHash) {
@@ -549,6 +562,30 @@ export class MultiFileEditExecutor {
       await this.writeFile(path, content);
     }
     this.backups.clear();
+  }
+
+  /**
+   * Convert line/character position to string offset
+   */
+  private positionToOffset(
+    text: string,
+    position: { line: number; character: number }
+  ): number {
+    let offset = 0;
+    let currentLine = 0;
+
+    while (currentLine < position.line) {
+      const nextNewline = text.indexOf('\n', offset);
+      if (nextNewline === -1) {
+        throw new Error(
+          `Edit position ${position.line}:${position.character} exceeds file length`
+        );
+      }
+      offset = nextNewline + 1;
+      currentLine++;
+    }
+
+    return offset + position.character;
   }
 
   /**

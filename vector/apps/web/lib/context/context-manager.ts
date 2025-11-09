@@ -339,6 +339,13 @@ export class ContextManager {
       lastAccess: Date.now(),
     };
 
+    // Remove old snapshot if refreshing
+    const existing = this.contextCache.get(key);
+    if (existing) {
+      this.contextCache.delete(key);
+      this.currentCacheSize -= existing.size;
+    }
+
     // Ensure we have space
     if (!this.canCache(size)) {
       await this.evictLRU(size);
