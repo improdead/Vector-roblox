@@ -195,10 +195,89 @@ See `IMPLEMENTATION_STATUS.md` for full details and needs (e.g., provider creden
 6. **Streaming**: Watch status panel for progress.
 7. **Undo**: Use Studio's undo for any applied changes.
 
+## Testing
+
+Vector includes a comprehensive automated testing framework for the agent's capabilities. The testing framework simulates Roblox Studio in a virtual environment, allowing you to test the agent's tool usage and behavior without manual intervention.
+
+### Quick Start
+
+```bash
+# Navigate to backend
+cd vector/apps/web
+
+# Run all tests with verbose output
+npm run test:agent:verbose
+
+# Generate JSON and HTML reports
+npm run test:agent:reports
+
+# Run only tool tests
+npm run test:agent -- --only=tool
+
+# Run only scenario tests
+npm run test:agent -- --only=scenario
+
+# Run specific tests
+npm run test:agent -- --only=create_instance,set_properties
+```
+
+### What Gets Tested
+
+The test suite includes:
+
+**Individual Tool Tests** (1 test):
+- Basic instance creation to verify API integration works
+
+**Scenario Tests** (7 real-world tests):
+
+*Intelligence & Reasoning:*
+- **Create Blinking Part**: Planning, script policy, code quality (loops, Color3, idempotency)
+- **Simple Part Creation**: Script policy enforcement (must write Luau even for simple geometry)
+- **Build Watch Tower**: Asset-first approach (prefer search_assets over manual geometry)
+- **Avoid Duplicate Creation**: Scene inspection before creating duplicates
+
+*Geometry Quality:*
+- **Build Simple House Structure**: Multi-part structures, anchoring, sizing, materials, CFrame positioning
+- **Create Aligned Part Grid**: Precise positioning, spacing, alignment, loops for efficiency
+- **Build Ramp or Stairs**: Rotation with CFrame.Angles, WedgeParts, incremental positioning
+
+### Test Reports
+
+The framework generates three types of output:
+
+1. **Terminal Output**: Real-time test execution with pass/fail indicators and summary statistics
+2. **JSON Report**: Machine-readable results in `test-results/test-results.json` for CI/CD integration
+3. **HTML Report**: Beautiful interactive report in `test-results/test-results.html` with expandable details
+
+### How It Works
+
+1. **Virtual Environment**: Creates an in-memory simulation of Roblox Studio with a file system and instance hierarchy
+2. **Agent Executor**: Connects to the real `/api/chat` endpoint with your configured LLM provider
+3. **Auto-Approval**: Automatically approves and applies all proposals to the virtual environment
+4. **Verification**: Uses two approaches:
+   - **Programmatic Checks**: Verifies tool usage, state changes, and specific code patterns
+   - **AI Review** (optional): GPT-5 Nano evaluates code quality, idempotency, and adherence to best practices
+5. **Detailed Logging**: Captures all tool calls, state changes, and performance metrics
+
+### Requirements
+
+- Backend running on `http://localhost:3000` (or configure with `--base-url`)
+- API key in `.env.local` for agent execution (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
+- **Optional**: `REVIEWER_OPENAI_API_KEY` in `.env.local` to enable AI review for intelligence tests
+- All dependencies installed (`npm install`)
+
+### Documentation
+
+For complete documentation on the testing framework, including architecture details and how to add new tests, see:
+- **`vector/apps/web/lib/testing/AGENT_TESTING_GUIDE.md`** - Complete testing guide (start here!)
+- `vector/apps/web/lib/testing/tests/scenario-tests.ts` - All test definitions (8 scenarios)
+- `TESTING_FRAMEWORK_REVIEW.md` - Technical implementation notes
+
 ## Contributing
 
 - **Linting**: Run `npm run lint` (ESLint, max-warnings=0).
 - **Building**: `npm run build` in backend.
+- **Testing**: Run `npm run test:agent` before submitting changes to verify agent behavior.
 - **Docs**: Update `Vector.md` and `IMPLEMENTATION_STATUS.md`.
 - **Issues**: Report via Git; focus on safety, UX, and provider integrations.
 

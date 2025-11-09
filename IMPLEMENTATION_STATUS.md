@@ -215,6 +215,35 @@ This document tracks what’s implemented, partial (placeholder or limited), and
       - `vector/plugin/src/tools/search_assets.lua:1` (uses configurable backend base URL)
       - `vector/plugin/src/tools/generate_asset_3d.lua:1` (uses configurable backend base URL)
 
+- Testing Framework (backend)
+  - Automated test runner for Vector agent capabilities with virtual Roblox Studio environment.
+    - `vector/apps/web/lib/testing/runner/virtual-env.ts:1` - In-memory simulation of Roblox Studio (file system + instance hierarchy)
+    - `vector/apps/web/lib/testing/runner/agent-executor.ts:1` - Connects to real `/api/chat` endpoint with auto-approval
+    - `vector/apps/web/lib/testing/runner/test-runner.ts:1` - Test execution orchestrator with detailed logging
+  - Test definitions covering real-world scenarios and API integration.
+    - `vector/apps/web/lib/testing/tests/tool-tests.ts:1` - 1 basic tool test (verifies API integration)
+    - `vector/apps/web/lib/testing/tests/scenario-tests.ts:1` - 7 scenario tests:
+      * Intelligence: planning, script policy, asset-first, scene inspection
+      * Geometry Quality: multi-part structures, alignment, rotation, anchoring, materials
+  - Report generators for terminal, JSON, and HTML output.
+    - `vector/apps/web/lib/testing/reports/json-reporter.ts:1` - Machine-readable JSON reports for CI/CD
+    - `vector/apps/web/lib/testing/reports/html-reporter.ts:1` - Interactive HTML reports with expandable details
+  - CLI entry point with comprehensive options.
+    - `vector/apps/web/scripts/test-agent.ts:1` - Command-line interface for running tests
+    - NPM scripts: `test:agent`, `test:agent:verbose`, `test:agent:reports`
+  - Features:
+    - Real API integration with configured LLM provider (reads from `.env`)
+    - Automatic proposal application to virtual environment
+    - Detailed logging of all tool calls and state changes
+    - Performance metrics (duration, tool call counts)
+    - Pass/fail verification with error reporting
+    - Support for test filtering (`--only=tool`, `--only=scenario`, specific test names)
+    - Configurable timeout and base URL
+  - Documentation:
+    - `vector/apps/web/lib/testing/AGENT_TESTING_GUIDE.md:1` - Comprehensive testing guide with architecture, examples, troubleshooting
+    - README.md includes testing section with usage examples
+    - TESTING_FRAMEWORK_REVIEW.md includes technical implementation notes
+
 ## Partially Implemented (placeholders or limited)
 
 - list_open_documents (plugin)
