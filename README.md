@@ -256,7 +256,7 @@ The framework generates three types of output:
 3. **Auto-Approval**: Automatically approves and applies all proposals to the virtual environment
 4. **Verification**: Uses two approaches:
    - **Programmatic Checks**: Verifies tool usage, state changes, and specific code patterns
-   - **AI Review** (optional): GPT-4o-mini evaluates code quality, idempotency, and adherence to best practices
+   - **AI Review** (optional): GPT-5 Nano evaluates code quality, idempotency, and adherence to best practices
 5. **Detailed Logging**: Captures all tool calls, state changes, and performance metrics
 
 ### Requirements

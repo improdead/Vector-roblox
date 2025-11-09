@@ -65,7 +65,7 @@ Traditional testing checks mechanics:
 - **Build Watch Tower** - Asset-first approach (prefer `search_assets` over manual creation)
 - **Avoid Duplicate Creation** - Scene inspection before creating (uses `list_children`)
 
-*These tests use GPT-4o-mini to evaluate code quality, idempotency, and adherence to Roblox best practices.*
+*These tests use GPT-5 Nano to evaluate code quality, idempotency, and adherence to Roblox best practices.*
 
 #### 3. Geometry Quality Tests (3 tests) **⚙️ Programmatic Checks Only**
 - **Build Simple House Structure** - Multi-part structures, anchoring, sizing, materials, hierarchy, proper CFrame positioning
@@ -110,7 +110,7 @@ Traditional testing checks mechanics:
 
 ### ✨ AI Review (Intelligence Tests Only)
 
-Intelligence tests (Create Blinking Part, Simple Part Creation, Build Watch Tower, Avoid Duplicate Creation) use **GPT-4o-mini** to review code quality in addition to programmatic checks.
+Intelligence tests (Create Blinking Part, Simple Part Creation, Build Watch Tower, Avoid Duplicate Creation) use **GPT-5 Nano** to review code quality in addition to programmatic checks.
 
 **What AI Reviews:**
 - **Idempotency**: Does code check for existing objects before creating?
@@ -130,7 +130,7 @@ Intelligence tests (Create Blinking Part, Simple Part Creation, Build Watch Towe
 Add to `.env.local` to enable AI review:
 ```bash
 REVIEWER_OPENAI_API_KEY=your-openai-key
-REVIEWER_MODEL=gpt-4o-mini  # Optional, defaults to gpt-4o-mini
+REVIEWER_MODEL=gpt-5-nano-2025-08-07  # Optional, defaults to gpt-5-nano-2025-08-07
 ```
 
 Without this key, intelligence tests will use programmatic checks only.

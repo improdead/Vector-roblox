@@ -9,7 +9,7 @@
  * - Appropriate tool usage
  * - Following best practices
  *
- * Intelligence tests (1-4) use AI review with GPT-4o-mini.
+ * Intelligence tests (1-4) use AI review with GPT-5 Nano.
  * Geometry quality tests (5-7) use programmatic verification only.
  *
  * @module testing/tests/scenario-tests

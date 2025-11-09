@@ -1,7 +1,7 @@
 /**
  * AI-Based Code Review for Intelligence Tests
  *
- * Uses GPT-4o-mini to evaluate the agent's output quality for intelligence/reasoning tests.
+ * Uses GPT-5 Nano to evaluate the agent's output quality for intelligence/reasoning tests.
  * Reviews code structure, planning, adherence to best practices, and Roblox-specific criteria.
  *
  * @module testing/runner/ai-reviewer
@@ -242,7 +242,7 @@ Respond in JSON format:
  */
 async function callOpenAI(prompt: string): Promise<any> {
   const apiKey = process.env.REVIEWER_OPENAI_API_KEY || process.env.OPENAI_API_KEY;
-  const model = process.env.REVIEWER_MODEL || 'gpt-4o-mini';
+  const model = process.env.REVIEWER_MODEL || 'gpt-5-nano-2025-08-07';
 
   if (!apiKey) {
     throw new Error('REVIEWER_OPENAI_API_KEY or OPENAI_API_KEY not set in .env');
