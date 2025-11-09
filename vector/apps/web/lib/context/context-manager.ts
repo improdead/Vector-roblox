@@ -108,7 +108,7 @@ export class ContextManager {
 
     // Trigger preloading if enabled
     if (this.preloadEnabled) {
-      this.triggerPreloading(request.projectId, context);
+      this.preloadRelevantContext(request.projectId);
     }
 
     return context;
