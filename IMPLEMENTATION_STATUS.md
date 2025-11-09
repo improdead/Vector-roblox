@@ -220,9 +220,9 @@ This document tracks what’s implemented, partial (placeholder or limited), and
     - `vector/apps/web/lib/testing/runner/virtual-env.ts:1` - In-memory simulation of Roblox Studio (file system + instance hierarchy)
     - `vector/apps/web/lib/testing/runner/agent-executor.ts:1` - Connects to real `/api/chat` endpoint with auto-approval
     - `vector/apps/web/lib/testing/runner/test-runner.ts:1` - Test execution orchestrator with detailed logging
-  - Test definitions covering all Vector tools and real-world scenarios.
-    - `vector/apps/web/lib/testing/tests/tool-tests.ts:1` - 11 individual tool tests (context, editing, instance, asset tools)
-    - `vector/apps/web/lib/testing/tests/scenario-tests.ts:1` - 2 multi-step scenario tests (blinking part, player leaderboard)
+  - Test definitions covering real-world scenarios and API integration.
+    - `vector/apps/web/lib/testing/tests/tool-tests.ts:1` - 1 basic tool test (verifies API integration)
+    - `vector/apps/web/lib/testing/tests/scenario-tests.ts:1` - 4 scenario tests (planning, script policy, asset-first, scene inspection)
   - Report generators for terminal, JSON, and HTML output.
     - `vector/apps/web/lib/testing/reports/json-reporter.ts:1` - Machine-readable JSON reports for CI/CD
     - `vector/apps/web/lib/testing/reports/html-reporter.ts:1` - Interactive HTML reports with expandable details

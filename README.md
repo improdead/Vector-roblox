@@ -225,15 +225,14 @@ npm run test:agent -- --only=create_instance,set_properties
 
 The test suite includes:
 
-**Individual Tool Tests** (11 tests):
-- Context tools: `get_active_script`, `list_selection`, `list_open_documents`
-- Editing tools: `show_diff`, `apply_edit`
-- Instance tools: `create_instance`, `set_properties`, `rename_instance`, `delete_instance`
-- Asset tools: `search_assets`, `insert_asset`
+**Individual Tool Tests** (1 test):
+- Basic instance creation to verify API integration works
 
-**Scenario Tests** (2 real-world tests):
-- **Create Blinking Part**: Tests multi-step workflow (create part → create script → implement blinking logic)
-- **Build Player Leaderboard**: Tests complex UI creation (ScreenGui → Frame → leaderboard script with PlayerAdded events)
+**Scenario Tests** (4 real-world tests):
+- **Create Blinking Part**: Tests planning, geometry creation, script policy compliance, and code quality
+- **Simple Part Creation**: Tests script policy enforcement (must write Luau even for simple geometry)
+- **Build Watch Tower**: Tests asset-first approach (prefer search_assets over manual geometry)
+- **Avoid Duplicate Creation**: Tests scene inspection before creating duplicates
 
 ### Test Reports
 
