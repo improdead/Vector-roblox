@@ -9,11 +9,15 @@
  * - Appropriate tool usage
  * - Following best practices
  *
+ * Intelligence tests (1-4) use AI review with GPT-4o-mini.
+ * Geometry quality tests (5-7) use programmatic verification only.
+ *
  * @module testing/tests/scenario-tests
  */
 
 import { VirtualEnvironment } from '../runner/virtual-env';
 import { ExecutionResult } from '../runner/agent-executor';
+import { reviewWithAI, isAIReviewEnabled } from '../runner/ai-reviewer';
 
 /**
  * Test verification result
@@ -23,6 +27,11 @@ export interface TestVerification {
   errors: string[];
   warnings: string[];
   details: string[];
+  aiReview?: {
+    score: number;
+    reasoning: string;
+    insights: string[];
+  };
 }
 
 /**
@@ -34,7 +43,8 @@ export interface ScenarioTest {
   prompt: string;
   expectedTools: string[];
   setup?: (env: VirtualEnvironment) => void;
-  verify: (result: ExecutionResult) => TestVerification;
+  verify: (result: ExecutionResult) => TestVerification | Promise<TestVerification>;
+  useAIReview?: boolean; // Enable AI review for this test
 }
 
 /**
@@ -51,8 +61,9 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
     description: 'Tests planning, geometry creation, script policy compliance, and code quality',
     prompt: 'Create a blinking part that alternates between red and blue every second',
     expectedTools: ['create_instance', 'apply_edit'],
+    useAIReview: true,
 
-    verify: (result) => {
+    verify: async (result) => {
       const errors: string[] = [];
       const warnings: string[] = [];
       const details: string[] = [];
@@ -147,11 +158,36 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
         warnings.push('Agent did not mark task as complete');
       }
 
+      // 7. AI Review (if enabled)
+      let aiReview = undefined;
+      if (isAIReviewEnabled()) {
+        const review = await reviewWithAI(result);
+
+        // Add AI review insights to details
+        if (review.insights.length > 0) {
+          details.push('', '🤖 AI Review Insights:');
+          review.insights.forEach(insight => details.push(`  • ${insight}`));
+        }
+
+        // Add AI issues to errors if review failed
+        if (!review.passed) {
+          errors.push('', '🤖 AI Review Issues:');
+          review.issues.forEach(issue => errors.push(`  • ${issue}`));
+        }
+
+        aiReview = {
+          score: review.score,
+          reasoning: review.reasoning,
+          insights: review.insights
+        };
+      }
+
       return {
         passed: errors.length === 0,
         errors,
         warnings,
-        details
+        details,
+        aiReview
       };
     }
   },
@@ -166,8 +202,9 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
     description: 'Tests that agent writes script even for simple geometry (script policy)',
     prompt: 'Create a red part at position (10, 5, 0) with size (4, 1, 4)',
     expectedTools: ['create_instance', 'apply_edit'],
+    useAIReview: true,
 
-    verify: (result) => {
+    verify: async (result) => {
       const errors: string[] = [];
       const warnings: string[] = [];
       const details: string[] = [];
@@ -247,11 +284,34 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
         }
       }
 
+      // AI Review (if enabled)
+      let aiReview = undefined;
+      if (isAIReviewEnabled()) {
+        const review = await reviewWithAI(result);
+
+        if (review.insights.length > 0) {
+          details.push('', '🤖 AI Review Insights:');
+          review.insights.forEach(insight => details.push(`  • ${insight}`));
+        }
+
+        if (!review.passed) {
+          errors.push('', '🤖 AI Review Issues:');
+          review.issues.forEach(issue => errors.push(`  • ${issue}`));
+        }
+
+        aiReview = {
+          score: review.score,
+          reasoning: review.reasoning,
+          insights: review.insights
+        };
+      }
+
       return {
         passed: errors.length === 0,
         errors,
         warnings,
-        details
+        details,
+        aiReview
       };
     }
   },
@@ -266,8 +326,9 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
     description: 'Tests that agent searches for assets before creating manual geometry',
     prompt: 'Build a military watch tower in the workspace',
     expectedTools: ['search_assets', 'insert_asset'],
+    useAIReview: true,
 
-    verify: (result) => {
+    verify: async (result) => {
       const errors: string[] = [];
       const warnings: string[] = [];
       const details: string[] = [];
@@ -348,11 +409,34 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
         }
       }
 
+      // AI Review (if enabled)
+      let aiReview = undefined;
+      if (isAIReviewEnabled()) {
+        const review = await reviewWithAI(result);
+
+        if (review.insights.length > 0) {
+          details.push('', '🤖 AI Review Insights:');
+          review.insights.forEach(insight => details.push(`  • ${insight}`));
+        }
+
+        if (!review.passed) {
+          errors.push('', '🤖 AI Review Issues:');
+          review.issues.forEach(issue => errors.push(`  • ${issue}`));
+        }
+
+        aiReview = {
+          score: review.score,
+          reasoning: review.reasoning,
+          insights: review.insights
+        };
+      }
+
       return {
         passed: errors.length === 0,
         errors,
         warnings,
-        details
+        details,
+        aiReview
       };
     }
   },
@@ -367,6 +451,7 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
     description: 'Tests that agent checks scene before creating duplicates',
     prompt: 'Add a leaderboard to the game',
     expectedTools: ['list_children', 'create_instance', 'apply_edit'],
+    useAIReview: true,
 
     setup: (env) => {
       // Pre-create a leaderboard
@@ -375,7 +460,7 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
       });
     },
 
-    verify: (result) => {
+    verify: async (result) => {
       const errors: string[] = [];
       const warnings: string[] = [];
       const details: string[] = [];
@@ -442,11 +527,34 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
         }
       }
 
+      // AI Review (if enabled)
+      let aiReview = undefined;
+      if (isAIReviewEnabled()) {
+        const review = await reviewWithAI(result);
+
+        if (review.insights.length > 0) {
+          details.push('', '🤖 AI Review Insights:');
+          review.insights.forEach(insight => details.push(`  • ${insight}`));
+        }
+
+        if (!review.passed) {
+          errors.push('', '🤖 AI Review Issues:');
+          review.issues.forEach(issue => errors.push(`  • ${issue}`));
+        }
+
+        aiReview = {
+          score: review.score,
+          reasoning: review.reasoning,
+          insights: review.insights
+        };
+      }
+
       return {
         passed: errors.length === 0,
         errors,
         warnings,
-        details
+        details,
+        aiReview
       };
     }
   },

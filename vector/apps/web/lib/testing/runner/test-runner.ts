@@ -33,6 +33,11 @@ export interface TestResult {
   warnings: string[];            // Warning messages
   details: string[];             // Additional details
   executionResult?: ExecutionResult;  // Full execution result
+  aiReview?: {                   // AI review results (if enabled)
+    score: number;
+    reasoning: string;
+    insights: string[];
+  };
 }
 
 /**
@@ -191,7 +196,7 @@ export class TestRunner {
 
       // Verify result
       this.log('   ✅ Execution complete, verifying...');
-      const verification = test.verify(executionResult);
+      const verification = await test.verify(executionResult);
 
       const duration = Date.now() - startTime;
 
@@ -259,7 +264,10 @@ export class TestRunner {
 
       // Verify result
       this.log('   ✅ Execution complete, verifying...');
-      const verification = test.verify(executionResult);
+      if (test.useAIReview) {
+        this.log('   🤖 Running AI review...');
+      }
+      const verification = await test.verify(executionResult);
 
       const duration = Date.now() - startTime;
 
@@ -272,7 +280,8 @@ export class TestRunner {
         errors: verification.errors,
         warnings: verification.warnings,
         details: verification.details,
-        executionResult
+        executionResult,
+        aiReview: verification.aiReview
       };
 
     } catch (error) {

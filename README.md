@@ -254,13 +254,16 @@ The framework generates three types of output:
 1. **Virtual Environment**: Creates an in-memory simulation of Roblox Studio with a file system and instance hierarchy
 2. **Agent Executor**: Connects to the real `/api/chat` endpoint with your configured LLM provider
 3. **Auto-Approval**: Automatically approves and applies all proposals to the virtual environment
-4. **Verification**: Checks that the agent used the correct tools and achieved the expected results
+4. **Verification**: Uses two approaches:
+   - **Programmatic Checks**: Verifies tool usage, state changes, and specific code patterns
+   - **AI Review** (optional): GPT-4o-mini evaluates code quality, idempotency, and adherence to best practices
 5. **Detailed Logging**: Captures all tool calls, state changes, and performance metrics
 
 ### Requirements
 
 - Backend running on `http://localhost:3000` (or configure with `--base-url`)
-- API key in `.env.local` (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
+- API key in `.env.local` for agent execution (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
+- **Optional**: `REVIEWER_OPENAI_API_KEY` in `.env.local` to enable AI review for intelligence tests
 - All dependencies installed (`npm install`)
 
 ### Documentation

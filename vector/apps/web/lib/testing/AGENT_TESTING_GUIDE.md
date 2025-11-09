@@ -59,16 +59,20 @@ Traditional testing checks mechanics:
 #### 1. Basic Tool Test (1 test)
 - **Create Instance** - Verifies API integration works
 
-#### 2. Intelligence Tests (4 tests)
+#### 2. Intelligence Tests (4 tests) **✨ AI Review Enabled**
 - **Create Blinking Part** - Planning, script policy, code quality (loops, Color3, wait, idempotency)
 - **Simple Part Creation** - Script policy enforcement (must write Luau even for simple geometry)
 - **Build Watch Tower** - Asset-first approach (prefer `search_assets` over manual creation)
 - **Avoid Duplicate Creation** - Scene inspection before creating (uses `list_children`)
 
-#### 3. Geometry Quality Tests (3 tests)
+*These tests use GPT-4o-mini to evaluate code quality, idempotency, and adherence to Roblox best practices.*
+
+#### 3. Geometry Quality Tests (3 tests) **⚙️ Programmatic Checks Only**
 - **Build Simple House Structure** - Multi-part structures, anchoring, sizing, materials, hierarchy, proper CFrame positioning
 - **Create Aligned Part Grid** - Precise positioning, spacing, alignment, loops for efficiency, color variation
 - **Build Ramp or Stairs** - Rotation with CFrame.Angles, WedgeParts, incremental positioning, compound shapes
+
+*These tests use programmatic verification (property checks, string matching, state validation).*
 
 ### What Each Test Verifies
 
@@ -103,6 +107,33 @@ Traditional testing checks mechanics:
 - Uses loops for repetitive structures
 - Sets proper properties (Color, Material, etc.)
 - Uses WedgePart for ramps/slopes
+
+### ✨ AI Review (Intelligence Tests Only)
+
+Intelligence tests (Create Blinking Part, Simple Part Creation, Build Watch Tower, Avoid Duplicate Creation) use **GPT-4o-mini** to review code quality in addition to programmatic checks.
+
+**What AI Reviews:**
+- **Idempotency**: Does code check for existing objects before creating?
+- **Anchoring**: Are parts properly anchored?
+- **Code Structure**: Loops, proper variable names, clean organization
+- **Luau Best Practices**: Instance.new(), CFrame.new(), Color3.fromRGB()
+- **Script Policy**: Did agent write Luau for geometry changes?
+- **Asset-First Approach**: Did agent search assets before manual creation?
+
+**Scoring:**
+- **90-100**: Excellent - All criteria met, production-quality code
+- **70-89**: Good - Most criteria met, minor issues
+- **50-69**: Acceptable - Basic functionality, some issues
+- **Below 50**: Poor - Major issues, fails test
+
+**Setup:**
+Add to `.env.local` to enable AI review:
+```bash
+REVIEWER_OPENAI_API_KEY=your-openai-key
+REVIEWER_MODEL=gpt-4o-mini  # Optional, defaults to gpt-4o-mini
+```
+
+Without this key, intelligence tests will use programmatic checks only.
 
 ---
 
