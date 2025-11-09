@@ -228,11 +228,18 @@ The test suite includes:
 **Individual Tool Tests** (1 test):
 - Basic instance creation to verify API integration works
 
-**Scenario Tests** (4 real-world tests):
-- **Create Blinking Part**: Tests planning, geometry creation, script policy compliance, and code quality
-- **Simple Part Creation**: Tests script policy enforcement (must write Luau even for simple geometry)
-- **Build Watch Tower**: Tests asset-first approach (prefer search_assets over manual geometry)
-- **Avoid Duplicate Creation**: Tests scene inspection before creating duplicates
+**Scenario Tests** (7 real-world tests):
+
+*Intelligence & Reasoning:*
+- **Create Blinking Part**: Planning, script policy, code quality (loops, Color3, idempotency)
+- **Simple Part Creation**: Script policy enforcement (must write Luau even for simple geometry)
+- **Build Watch Tower**: Asset-first approach (prefer search_assets over manual geometry)
+- **Avoid Duplicate Creation**: Scene inspection before creating duplicates
+
+*Geometry Quality:*
+- **Build Simple House Structure**: Multi-part structures, anchoring, sizing, materials, CFrame positioning
+- **Create Aligned Part Grid**: Precise positioning, spacing, alignment, loops for efficiency
+- **Build Ramp or Stairs**: Rotation with CFrame.Angles, WedgeParts, incremental positioning
 
 ### Test Reports
 
@@ -259,9 +266,9 @@ The framework generates three types of output:
 ### Documentation
 
 For complete documentation on the testing framework, including architecture details and how to add new tests, see:
-- `vector/apps/web/lib/testing/TESTING_ENVIRONMENT.md` - Full testing documentation
-- `vector/apps/web/lib/testing/tests/tool-tests.ts` - Individual tool test definitions
-- `vector/apps/web/lib/testing/tests/scenario-tests.ts` - Scenario test definitions
+- **`vector/apps/web/lib/testing/AGENT_TESTING_GUIDE.md`** - Complete testing guide (start here!)
+- `vector/apps/web/lib/testing/tests/scenario-tests.ts` - All test definitions (8 scenarios)
+- `TESTING_FRAMEWORK_REVIEW.md` - Technical implementation notes
 
 ## Contributing
 

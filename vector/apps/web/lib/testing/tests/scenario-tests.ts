@@ -449,5 +449,388 @@ export const SCENARIO_TESTS: ScenarioTest[] = [
         details
       };
     }
+  },
+
+  // ============================================================================
+  // SCENARIO 5: Geometry Quality - Simple Structure
+  // Tests: Proper positioning, anchoring, sizing, materials
+  // ============================================================================
+
+  {
+    name: 'Build Simple House Structure',
+    description: 'Tests geometry quality: positioning, anchoring, sizing, materials, hierarchy',
+    prompt: 'Build a simple house with a floor (16x1x16), four walls (each 1 unit thick), and a roof',
+    expectedTools: ['create_instance', 'apply_edit'],
+
+    verify: (result) => {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      const details: string[] = [];
+
+      // Check if structure was created with proper hierarchy
+      const instances = result.finalState.instances;
+
+      // Look for parent container (Model or Folder)
+      const hasContainer = instances.some((i: any) => {
+        const [path, inst] = i;
+        return (inst.className === 'Model' || inst.className === 'Folder') &&
+               (inst.name.toLowerCase().includes('house') ||
+                inst.name.toLowerCase().includes('structure'));
+      });
+
+      if (!hasContainer) {
+        warnings.push('Should create parent Model/Folder to organize parts');
+      } else {
+        details.push('✓ Created parent container for organization');
+      }
+
+      // Check for multiple parts (floor + walls + roof = at least 6 parts)
+      const parts = instances.filter((i: any) => {
+        const [path, inst] = i;
+        return inst.className === 'Part' || inst.className === 'WedgePart';
+      });
+
+      if (parts.length < 5) {
+        errors.push(`Only created ${parts.length} parts (expected at least 5 for floor + 4 walls)`);
+      } else {
+        details.push(`✓ Created ${parts.length} parts`);
+      }
+
+      // Check geometry properties in created instances
+      let hasAnchored = false;
+      let hasProperSize = false;
+      let hasCFrame = false;
+      let hasMaterial = false;
+
+      for (const [path, inst] of parts) {
+        const props = inst.properties;
+
+        // Check Anchored
+        if (props.Anchored === true) {
+          hasAnchored = true;
+        }
+
+        // Check Size (should have Vector3 with reasonable dimensions)
+        if (props.Size && typeof props.Size === 'object') {
+          const size = props.Size;
+          if ((size.__t === 'Vector3' || size.x !== undefined) &&
+              size.x > 0 && size.y > 0 && size.z > 0) {
+            hasProperSize = true;
+          }
+        }
+
+        // Check CFrame (positioning)
+        if (props.CFrame && typeof props.CFrame === 'object') {
+          hasCFrame = true;
+        }
+
+        // Check Material
+        if (props.Material) {
+          hasMaterial = true;
+        }
+      }
+
+      if (!hasAnchored) {
+        errors.push('Parts should be Anchored (no Anchored=true found in properties)');
+      } else {
+        details.push('✓ Parts are anchored');
+      }
+
+      if (!hasProperSize) {
+        errors.push('Parts should have proper Size property (Vector3)');
+      } else {
+        details.push('✓ Parts have proper sizes');
+      }
+
+      if (!hasCFrame) {
+        warnings.push('Parts should have CFrame for positioning');
+      } else {
+        details.push('✓ Parts have CFrame positioning');
+      }
+
+      if (!hasMaterial) {
+        warnings.push('Parts should have Material property for appearance');
+      } else {
+        details.push('✓ Parts have materials set');
+      }
+
+      // Check script quality
+      const scriptWritten = result.proposals.some(p => p.type === 'edit');
+
+      if (!scriptWritten) {
+        errors.push('No script written (violates script policy for geometry)');
+      } else {
+        details.push('✓ Script written');
+
+        const scriptFile = result.finalState.files.find((f: any) =>
+          f[0].includes('Script')
+        );
+
+        if (scriptFile) {
+          const [path, file] = scriptFile;
+          const content = file.content.toLowerCase();
+
+          // Check for proper structure creation in script
+          const hasInstanceNew = content.includes('instance.new');
+          const hasCFrameNew = content.includes('cframe.new') || content.includes('cframe.from');
+          const hasVector3New = content.includes('vector3.new');
+          const hasParenting = content.includes('.parent =') || content.includes('.parent=');
+
+          if (!hasInstanceNew) {
+            warnings.push('Script should use Instance.new() to create parts');
+          } else {
+            details.push('✓ Script uses Instance.new()');
+          }
+
+          if (!hasCFrameNew) {
+            warnings.push('Script should use CFrame.new() for positioning');
+          } else {
+            details.push('✓ Script uses CFrame positioning');
+          }
+
+          if (!hasVector3New) {
+            warnings.push('Script should use Vector3.new() for sizes');
+          } else {
+            details.push('✓ Script uses Vector3 for sizes');
+          }
+
+          if (!hasParenting) {
+            warnings.push('Script should set .Parent property');
+          } else {
+            details.push('✓ Script sets parent relationships');
+          }
+        }
+      }
+
+      return {
+        passed: errors.length === 0,
+        errors,
+        warnings,
+        details
+      };
+    }
+  },
+
+  // ============================================================================
+  // SCENARIO 6: Complex Geometry - Proper Alignment
+  // Tests: Alignment, spacing, rotation, precise positioning
+  // ============================================================================
+
+  {
+    name: 'Create Aligned Part Grid',
+    description: 'Tests precise positioning, alignment, and spacing in geometry',
+    prompt: 'Create a 3x3 grid of colored parts, each 4x4x4 studs, spaced 2 studs apart, all at Y=2',
+    expectedTools: ['create_instance', 'apply_edit'],
+
+    verify: (result) => {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      const details: string[] = [];
+
+      // Check if script was written
+      const scriptWritten = result.proposals.some(p => p.type === 'edit');
+
+      if (!scriptWritten) {
+        errors.push('No script written (violates script policy)');
+        return { passed: false, errors, warnings, details };
+      }
+
+      const scriptFile = result.finalState.files.find((f: any) =>
+        f[0].includes('Script')
+      );
+
+      if (!scriptFile) {
+        errors.push('Script file not found in final state');
+        return { passed: false, errors, warnings, details };
+      }
+
+      const [path, file] = scriptFile;
+      const content = file.content.toLowerCase();
+
+      // Check for loop structure (should use loops for grid)
+      const hasLoop =
+        (content.includes('for ') && content.includes('do')) ||
+        content.includes('while');
+
+      if (!hasLoop) {
+        warnings.push('Should use loops (for i = 1, 3) for creating grid efficiently');
+      } else {
+        details.push('✓ Uses loop structure for grid');
+      }
+
+      // Check for proper positioning logic
+      const hasPositionCalc =
+        content.includes('*') || // Multiplication for spacing
+        content.includes('+') || // Addition for offset
+        content.includes('-');   // Subtraction for centering
+
+      if (!hasPositionCalc) {
+        warnings.push('Should calculate positions using math operations');
+      } else {
+        details.push('✓ Calculates positions programmatically');
+      }
+
+      // Check for consistent Y position
+      const mentionsY2 = content.includes('y = 2') || content.includes('y=2');
+
+      if (!mentionsY2) {
+        warnings.push('Should set consistent Y position (Y=2)');
+      } else {
+        details.push('✓ Uses consistent Y position');
+      }
+
+      // Check for spacing logic
+      const mentionsSpacing =
+        content.includes('spacing') ||
+        content.includes('gap') ||
+        content.includes('offset');
+
+      if (mentionsSpacing) {
+        details.push('✓ Considers spacing in logic');
+      }
+
+      // Check for color variation
+      const hasColorLogic =
+        content.includes('color3') ||
+        content.includes('brickcolor') ||
+        content.includes('color =');
+
+      if (!hasColorLogic) {
+        warnings.push('Should vary colors for grid parts');
+      } else {
+        details.push('✓ Includes color variation');
+      }
+
+      // Check for proper size setting (4x4x4)
+      const mentionsSize4 = content.includes('4, 4, 4') || content.includes('4,4,4');
+
+      if (mentionsSize4) {
+        details.push('✓ Uses correct size (4x4x4)');
+      }
+
+      // Check instances created
+      const parts = result.finalState.instances.filter((i: any) => {
+        const [path, inst] = i;
+        return inst.className === 'Part';
+      });
+
+      if (parts.length < 9) {
+        warnings.push(`Only created ${parts.length} parts (expected 9 for 3x3 grid)`);
+      } else if (parts.length === 9) {
+        details.push('✓ Created exactly 9 parts for 3x3 grid');
+      } else {
+        details.push(`✓ Created ${parts.length} parts`);
+      }
+
+      return {
+        passed: errors.length === 0,
+        errors,
+        warnings,
+        details
+      };
+    }
+  },
+
+  // ============================================================================
+  // SCENARIO 7: Advanced Geometry - Rotation and Complex Shapes
+  // Tests: CFrame rotation, WedgeParts, compound shapes
+  // ============================================================================
+
+  {
+    name: 'Build Ramp or Stairs',
+    description: 'Tests rotation, WedgeParts, and complex geometry assembly',
+    prompt: 'Build a ramp or staircase going up 10 studs over 20 studs distance',
+    expectedTools: ['create_instance', 'apply_edit'],
+
+    verify: (result) => {
+      const errors: string[] = [];
+      const warnings: string[] = [];
+      const details: string[] = [];
+
+      // Check if script was written
+      const scriptWritten = result.proposals.some(p => p.type === 'edit');
+
+      if (!scriptWritten) {
+        errors.push('No script written (violates script policy)');
+        return { passed: false, errors, warnings, details };
+      }
+
+      const scriptFile = result.finalState.files.find((f: any) =>
+        f[0].includes('Script')
+      );
+
+      if (!scriptFile) {
+        errors.push('Script file not found');
+        return { passed: false, errors, warnings, details };
+      }
+
+      const [path, file] = scriptFile;
+      const content = file.content.toLowerCase();
+
+      // Check for WedgePart usage (common for ramps)
+      const usesWedge = content.includes('wedgepart');
+
+      if (usesWedge) {
+        details.push('✓ Uses WedgePart (appropriate for ramps)');
+      }
+
+      // Check for rotation/CFrame manipulation
+      const hasRotation =
+        content.includes('cframe.angles') ||
+        content.includes('cframe.fromaxisangle') ||
+        content.includes('cframe.fromeulerangle') ||
+        content.includes('rotation');
+
+      if (!hasRotation && usesWedge) {
+        warnings.push('Should use CFrame.Angles or rotation for proper wedge orientation');
+      } else if (hasRotation) {
+        details.push('✓ Uses CFrame rotation');
+      }
+
+      // Check for proper incremental positioning (for stairs)
+      const hasIncrement =
+        (content.includes('for ') &&
+         (content.includes('+=') || content.includes('+ '))) ||
+        content.includes('step');
+
+      if (hasIncrement) {
+        details.push('✓ Uses incremental positioning (good for stairs)');
+      }
+
+      // Check for proper anchoring
+      const hasAnchored = content.includes('anchored = true') || content.includes('anchored=true');
+
+      if (!hasAnchored) {
+        warnings.push('Parts should be anchored');
+      } else {
+        details.push('✓ Parts are anchored');
+      }
+
+      // Check instances created
+      const instances = result.finalState.instances.filter((i: any) => {
+        const [path, inst] = i;
+        return inst.className === 'Part' || inst.className === 'WedgePart';
+      });
+
+      if (instances.length < 1) {
+        errors.push('No parts/wedges created');
+      } else {
+        details.push(`✓ Created ${instances.length} geometric instances`);
+      }
+
+      // Verify proper vertical rise
+      const mentions10Studs = content.includes('10') && (content.includes('height') || content.includes('rise') || content.includes('y'));
+
+      if (mentions10Studs) {
+        details.push('✓ Accounts for 10 stud vertical rise');
+      }
+
+      return {
+        passed: errors.length === 0,
+        errors,
+        warnings,
+        details
+      };
+    }
   }
 ];
