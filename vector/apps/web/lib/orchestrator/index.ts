@@ -61,7 +61,7 @@ export type ChatInput = {
     codeDefinitions?: { file: string; line: number; name: string }[]
   }
   provider?: {
-    name: 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
+    name: 'openai' | 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
     apiKey: string
     model?: string
     baseUrl?: string
@@ -102,6 +102,7 @@ function computeAnchors(baseText: string, edits: Edit[]): EditAnchors {
 }
 
 // Provider call
+import { callOpenAI } from './providers/openai'
 import { callOpenRouter } from './providers/openrouter'
 import { callGemini } from './providers/gemini'
 import { callBedrock } from './providers/bedrock'
@@ -134,7 +135,7 @@ import {
   hydrateSceneSnapshot,
 } from './sceneGraph'
 
-type ProviderMode = 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
+type ProviderMode = 'openai' | 'openrouter' | 'gemini' | 'bedrock' | 'nvidia'
 
 type ProviderSelection = {
   mode: ProviderMode
@@ -266,6 +267,7 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
   const debug = (process.env.VECTOR_DEBUG || process.env.PROVIDER_DEBUG || '0') === '1'
 
   const keys = {
+    openai:     !!normalizeString(process.env.OPENAI_API_KEY),
     openrouter: !!normalizeString(process.env.OPENROUTER_API_KEY),
     gemini:     !!normalizeString(process.env.GEMINI_API_KEY),
     bedrock:    bedrockKeyPresent,
@@ -273,18 +275,20 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
   }
 
   const preference: ProviderMode[] = []
-  if (overrideRaw) preference.push(overrideIsGemini ? 'gemini' : (overrideIsBedrock ? 'bedrock' : (overrideIsNvidia ? 'nvidia' : 'openrouter')))
+  if (overrideRaw) preference.push(overrideIsGemini ? 'gemini' : (overrideIsBedrock ? 'bedrock' : (overrideIsNvidia ? 'nvidia' : 'openai')))
+  if (input.provider?.name === 'openai') preference.push('openai')
   if (input.provider?.name === 'gemini') preference.push('gemini')
   if (input.provider?.name === 'openrouter') preference.push('openrouter')
   if ((input as any).provider?.name === 'bedrock') preference.push('bedrock')
   if ((input as any).provider?.name === 'nvidia') preference.push('nvidia')
+  if (defaultProviderEnv === 'openai') preference.push('openai')
   if (defaultProviderEnv === 'gemini') preference.push('gemini')
   if (defaultProviderEnv === 'openrouter') preference.push('openrouter')
   if (defaultProviderEnv === 'bedrock') preference.push('bedrock')
   if (defaultProviderEnv === 'nvidia') preference.push('nvidia')
   if (forceOpenRouter) preference.push('openrouter')
-  // Ensure we eventually try both providers as fallbacks in a deterministic order
-  preference.push('gemini', 'nvidia', 'bedrock', 'openrouter')
+  // Ensure we eventually try all providers as fallbacks in a deterministic order
+  preference.push('openai', 'gemini', 'nvidia', 'bedrock', 'openrouter')
 
   const ordered: ProviderMode[] = []
   for (const mode of preference) {
@@ -293,6 +297,18 @@ function determineProvider(opts: { input: ChatInput; modelOverride?: string | nu
   if (debug) console.log(`[provider.select] override=${overrideRaw || 'none'} default=${defaultProviderEnv || 'none'} keys=${JSON.stringify(keys)} order=${ordered.join('>')}`)
 
   for (const mode of ordered) {
+    if (mode === 'openai') {
+      const providerInput = input.provider?.name === 'openai' ? input.provider : undefined
+      const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.OPENAI_API_KEY)
+      if (!apiKey) continue
+      const model =
+        normalizeString(providerInput?.model) ||
+        (overrideRaw && !overrideIsGemini && !overrideIsBedrock && !overrideIsNvidia ? overrideRaw : undefined) ||
+        normalizeString(process.env.OPENAI_MODEL)
+      const baseUrl = normalizeString(providerInput?.baseUrl) || normalizeString(process.env.OPENAI_API_BASE_URL)
+      return { mode, apiKey, model, baseUrl }
+    }
+
     if (mode === 'openrouter') {
       const providerInput = input.provider?.name === 'openrouter' ? input.provider : undefined
       const apiKey = normalizeString(providerInput?.apiKey) || normalizeString(process.env.OPENROUTER_API_KEY)
@@ -1440,14 +1456,16 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
       let content = ''
       try {
         const timeoutMs = Number(
-          activeProvider === 'gemini'
-            ? process.env.GEMINI_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
-            : activeProvider === 'bedrock'
-              ? process.env.BEDROCK_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
-              : process.env.OPENROUTER_TIMEOUT_MS || 30000,
+          activeProvider === 'openai'
+            ? process.env.OPENAI_TIMEOUT_MS || 30000
+            : activeProvider === 'gemini'
+              ? process.env.GEMINI_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
+              : activeProvider === 'bedrock'
+                ? process.env.BEDROCK_TIMEOUT_MS || process.env.OPENROUTER_TIMEOUT_MS || 30000
+                : process.env.OPENROUTER_TIMEOUT_MS || 30000,
         )
-        const resp = activeProvider === 'gemini'
-          ? await callGemini({
+        const resp = activeProvider === 'openai'
+          ? await callOpenAI({
               systemPrompt: SYSTEM_PROMPT,
               messages: convo as any,
               model: providerSelection.model,
@@ -1455,26 +1473,8 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
               baseUrl: providerSelection.baseUrl,
               timeoutMs,
             })
-          : activeProvider === 'bedrock'
-            ? await callBedrock({
-                systemPrompt: SYSTEM_PROMPT,
-                messages: convo as any,
-                model: providerSelection.model,
-                apiKey: providerSelection.apiKey,
-                region: (providerSelection as any).region,
-                timeoutMs,
-              })
-            : activeProvider === 'nvidia'
-            ? await callNvidia({
-                systemPrompt: SYSTEM_PROMPT,
-                messages: convo as any,
-                model: providerSelection.model,
-                apiKey: providerSelection.apiKey,
-                baseUrl: providerSelection.baseUrl,
-                deploymentId: (providerSelection as any).deploymentId,
-                timeoutMs,
-              })
-            : await callOpenRouter({
+          : activeProvider === 'gemini'
+            ? await callGemini({
                 systemPrompt: SYSTEM_PROMPT,
                 messages: convo as any,
                 model: providerSelection.model,
@@ -1482,6 +1482,33 @@ export async function runLLM(input: ChatInput): Promise<{ proposals: Proposal[];
                 baseUrl: providerSelection.baseUrl,
                 timeoutMs,
               })
+            : activeProvider === 'bedrock'
+              ? await callBedrock({
+                  systemPrompt: SYSTEM_PROMPT,
+                  messages: convo as any,
+                  model: providerSelection.model,
+                  apiKey: providerSelection.apiKey,
+                  region: (providerSelection as any).region,
+                  timeoutMs,
+                })
+              : activeProvider === 'nvidia'
+              ? await callNvidia({
+                  systemPrompt: SYSTEM_PROMPT,
+                  messages: convo as any,
+                  model: providerSelection.model,
+                  apiKey: providerSelection.apiKey,
+                  baseUrl: providerSelection.baseUrl,
+                  deploymentId: (providerSelection as any).deploymentId,
+                  timeoutMs,
+                })
+              : await callOpenRouter({
+                  systemPrompt: SYSTEM_PROMPT,
+                  messages: convo as any,
+                  model: providerSelection.model,
+                  apiKey: providerSelection.apiKey,
+                  baseUrl: providerSelection.baseUrl,
+                  timeoutMs,
+                })
         content = resp.content || ''
         pushChunk(streamKey, `provider.response provider=${activeProvider} turn=${turn} chars=${content.length}`)
         console.log(`[orch] provider.ok provider=${activeProvider} turn=${turn} contentLen=${content.length}`)
