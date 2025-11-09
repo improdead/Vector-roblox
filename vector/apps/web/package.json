@@ -11,7 +11,10 @@
     "test:orchestrator": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node lib/orchestrator/index.test.ts",
     "test:providers": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-providers.ts",
     "test:select": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-select.ts",
-    "test:catalog": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-catalog.ts"
+    "test:catalog": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-catalog.ts",
+    "test:agent": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-agent.ts",
+    "test:agent:verbose": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-agent.ts -- --verbose",
+    "test:agent:reports": "TS_NODE_COMPILER_OPTIONS=\"{\\\"module\\\":\\\"commonjs\\\",\\\"moduleResolution\\\":\\\"node\\\"}\" ts-node scripts/test-agent.ts -- --json --html"
   },
   "dependencies": {
     "adm-zip": "^0.5.12",

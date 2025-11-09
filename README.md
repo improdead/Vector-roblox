@@ -195,10 +195,80 @@ See `IMPLEMENTATION_STATUS.md` for full details and needs (e.g., provider creden
 6. **Streaming**: Watch status panel for progress.
 7. **Undo**: Use Studio's undo for any applied changes.
 
+## Testing
+
+Vector includes a comprehensive automated testing framework for the agent's capabilities. The testing framework simulates Roblox Studio in a virtual environment, allowing you to test the agent's tool usage and behavior without manual intervention.
+
+### Quick Start
+
+```bash
+# Navigate to backend
+cd vector/apps/web
+
+# Run all tests with verbose output
+npm run test:agent:verbose
+
+# Generate JSON and HTML reports
+npm run test:agent:reports
+
+# Run only tool tests
+npm run test:agent -- --only=tool
+
+# Run only scenario tests
+npm run test:agent -- --only=scenario
+
+# Run specific tests
+npm run test:agent -- --only=create_instance,set_properties
+```
+
+### What Gets Tested
+
+The test suite includes:
+
+**Individual Tool Tests** (11 tests):
+- Context tools: `get_active_script`, `list_selection`, `list_open_documents`
+- Editing tools: `show_diff`, `apply_edit`
+- Instance tools: `create_instance`, `set_properties`, `rename_instance`, `delete_instance`
+- Asset tools: `search_assets`, `insert_asset`
+
+**Scenario Tests** (2 real-world tests):
+- **Create Blinking Part**: Tests multi-step workflow (create part → create script → implement blinking logic)
+- **Build Player Leaderboard**: Tests complex UI creation (ScreenGui → Frame → leaderboard script with PlayerAdded events)
+
+### Test Reports
+
+The framework generates three types of output:
+
+1. **Terminal Output**: Real-time test execution with pass/fail indicators and summary statistics
+2. **JSON Report**: Machine-readable results in `test-results/test-results.json` for CI/CD integration
+3. **HTML Report**: Beautiful interactive report in `test-results/test-results.html` with expandable details
+
+### How It Works
+
+1. **Virtual Environment**: Creates an in-memory simulation of Roblox Studio with a file system and instance hierarchy
+2. **Agent Executor**: Connects to the real `/api/chat` endpoint with your configured LLM provider
+3. **Auto-Approval**: Automatically approves and applies all proposals to the virtual environment
+4. **Verification**: Checks that the agent used the correct tools and achieved the expected results
+5. **Detailed Logging**: Captures all tool calls, state changes, and performance metrics
+
+### Requirements
+
+- Backend running on `http://localhost:3000` (or configure with `--base-url`)
+- API key in `.env.local` (`ANTHROPIC_API_KEY` or `OPENAI_API_KEY`)
+- All dependencies installed (`npm install`)
+
+### Documentation
+
+For complete documentation on the testing framework, including architecture details and how to add new tests, see:
+- `vector/apps/web/lib/testing/TESTING_ENVIRONMENT.md` - Full testing documentation
+- `vector/apps/web/lib/testing/tests/tool-tests.ts` - Individual tool test definitions
+- `vector/apps/web/lib/testing/tests/scenario-tests.ts` - Scenario test definitions
+
 ## Contributing
 
 - **Linting**: Run `npm run lint` (ESLint, max-warnings=0).
 - **Building**: `npm run build` in backend.
+- **Testing**: Run `npm run test:agent` before submitting changes to verify agent behavior.
 - **Docs**: Update `Vector.md` and `IMPLEMENTATION_STATUS.md`.
 - **Issues**: Report via Git; focus on safety, UX, and provider integrations.
 
